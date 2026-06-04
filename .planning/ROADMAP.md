@@ -29,7 +29,10 @@ Reliably extract every Precede ID from every page across 30K+ PDFs so the user c
   3. Results are written as CSV with columns: filename, id, page
   4. The tool handles multi-page PDFs without memory exhaustion
   5. Images are converted at 300+ DPI for reliable digit recognition
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 01-01-PLAN.md — Setup environment and implement complete OCR pipeline (precede_ocr.py)
+- [ ] 01-02-PLAN.md — Create test infrastructure and validate with real PDF
 
 ### Phase 2: Rotation Handling — Multi-Angle OCR
 **Goal**: Correctly extract IDs from pages at any rotation (0/90/180/270 degrees) by trying all angles.
@@ -80,7 +83,7 @@ Reliably extract every Precede ID from every page across 30K+ PDFs so the user c
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation | 0/0 | Not started | - |
+| 1. Foundation | 0/2 | Planned | - |
 | 2. Rotation Handling | 0/0 | Not started | - |
 | 3. Scale | 0/0 | Not started | - |
 | 4. Resilience | 0/0 | Not started | - |
