@@ -15,11 +15,35 @@ import pytesseract
 import pandas as pd
 from pdf2image import convert_from_path
 
-# Configure Tesseract path (not in PATH on Windows)
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+# Configure Tesseract path (auto-detect common Windows locations)
+TESSERACT_SEARCH_PATHS = [
+    Path(r'C:\Program Files\Tesseract-OCR\tesseract.exe'),
+    Path.home() / 'Tesseract-OCR' / 'tesseract.exe',
+    Path(r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe'),
+]
 
-# Poppler is in PATH, so no explicit path needed
+for _tess_path in TESSERACT_SEARCH_PATHS:
+    if _tess_path.is_file():
+        pytesseract.pytesseract.tesseract_cmd = str(_tess_path)
+        break
+else:
+    # Fall back to assuming it's in PATH
+    pytesseract.pytesseract.tesseract_cmd = 'tesseract'
+
+# Configure Poppler path (auto-detect common Windows locations)
+POPPLER_SEARCH_PATHS = [
+    Path.home() / 'poppler' / 'Library' / 'bin',
+    Path.home() / 'poppler' / 'bin',
+    Path.home() / 'poppler',
+    Path(r'C:\Program Files\poppler\Library\bin'),
+    Path(r'C:\Program Files\poppler\bin'),
+]
+
 POPPLER_PATH = None
+for _pop_path in POPPLER_SEARCH_PATHS:
+    if _pop_path.is_dir() and any(_pop_path.glob('pdftoppm*')):
+        POPPLER_PATH = str(_pop_path)
+        break
 
 
 def normalize_digits(text: str) -> str:
