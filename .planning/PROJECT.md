@@ -22,6 +22,8 @@ Reliably extract every Precede ID from every page across 30K+ PDFs so the user c
 - [x] Flag pages where no ID is found (not silently dropped) — Validated in Phase 3: Scale
 - [x] Handle multiple IDs per page if present — Validated in Phase 3: Scale
 - [x] Parallelize processing to handle 30,429 files efficiently — Validated in Phase 3: Scale
+- [x] Per-file error handling so a single corrupted PDF does not crash the batch — Validated in Phase 4: Resilience
+- [x] Checkpoint/resume capability to continue after crash or interruption — Validated in Phase 4: Resilience
 
 ### Active
 
@@ -81,4 +83,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-05 after Phase 3 completion*
+*Last updated: 2026-06-05 after Phase 4 completion*
