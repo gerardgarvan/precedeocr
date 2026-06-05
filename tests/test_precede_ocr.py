@@ -1439,7 +1439,7 @@ class TestValidateSequence:
             assert 'seq_outlier' not in r['notes']
 
     def test_wild_outlier_flagged(self):
-        """An ID wildly deviating from the trend is flagged with seq_outlier_conf."""
+        """An ID wildly deviating from the trend is flagged; normal IDs are not."""
         results = [
             self._make_result('a.pdf', 1, ['10001']),
             self._make_result('a.pdf', 2, ['10002']),
@@ -1451,6 +1451,9 @@ class TestValidateSequence:
         # The outlier (page 5, id 99999) should be flagged
         page5 = [r for r in validated if r['page'] == 5][0]
         assert 'seq_outlier_conf_' in page5['notes']
+        # Normal sequential IDs should NOT be flagged
+        for r in [x for x in validated if x['page'] != 5]:
+            assert 'seq_outlier' not in r['notes'], f"Page {r['page']} should not be flagged"
 
     def test_fewer_than_3_ids_skipped(self):
         """Files with fewer than 3 valid IDs are not validated (passed through)."""
@@ -1472,6 +1475,9 @@ class TestValidateSequence:
         validated = validate_sequence(results)
         page3 = [r for r in validated if r['page'] == 3][0]
         assert 'seq_outlier_conf_' in page3['notes']
+        # Normal IDs should NOT be flagged
+        for r in [x for x in validated if x['page'] != 3]:
+            assert 'seq_outlier' not in r['notes']
 
     def test_notes_combined_with_semicolon(self):
         """Existing 'preprocessed' note gets semicolon-separated outlier flag."""
@@ -1588,6 +1594,61 @@ class TestValidateSequence:
         current_notes = [r['notes'] for r in results]
         assert original_notes == current_notes
 
+    def test_outlier_not_pulled_by_extreme(self):
+        """Theil-Sen regression is not pulled by extreme outlier (UAT regression test).
+        Simulates real-world data: IDs 16243-16284 with outlier 89791."""
+        results = [
+            self._make_result('a.pdf', 1, ['16243']),
+            self._make_result('a.pdf', 2, ['16245']),
+            self._make_result('a.pdf', 3, ['89791']),  # Extreme outlier
+            self._make_result('a.pdf', 4, ['16250']),
+            self._make_result('a.pdf', 5, ['16253']),
+            self._make_result('a.pdf', 6, ['16256']),
+            self._make_result('a.pdf', 7, ['16259']),
+            self._make_result('a.pdf', 8, ['16262']),
+            self._make_result('a.pdf', 9, ['16265']),
+            self._make_result('a.pdf', 10, ['16268']),
+        ]
+        validated = validate_sequence(results)
+        # Only the extreme outlier on page 3 should be flagged
+        page3 = [r for r in validated if r['page'] == 3][0]
+        assert 'seq_outlier_conf_' in page3['notes'], "Extreme outlier should be flagged"
+        # All other pages should NOT be flagged
+        for r in [x for x in validated if x['page'] != 3]:
+            assert 'seq_outlier' not in r['notes'], f"Page {r['page']} (ID {r['ids']}) should NOT be flagged"
+
+    def test_outlier_confidence_is_high(self):
+        """Extreme outliers should get high confidence (>50%), not 0%."""
+        results = [
+            self._make_result('a.pdf', 1, ['10001']),
+            self._make_result('a.pdf', 2, ['10002']),
+            self._make_result('a.pdf', 3, ['10003']),
+            self._make_result('a.pdf', 4, ['10004']),
+            self._make_result('a.pdf', 5, ['99999']),  # Extreme outlier
+        ]
+        validated = validate_sequence(results)
+        page5 = [r for r in validated if r['page'] == 5][0]
+        # Extract confidence value
+        import re as _re
+        match = _re.search(r'seq_outlier_conf_(\d+)%', page5['notes'])
+        assert match, "Outlier should have confidence flag"
+        confidence = int(match.group(1))
+        assert confidence > 50, f"Extreme outlier should have high confidence, got {confidence}%"
+
+    def test_no_duplicate_flags_multi_id_page(self):
+        """Multi-ID page should not get duplicate flags."""
+        results = [
+            self._make_result('a.pdf', 1, ['10001']),
+            self._make_result('a.pdf', 2, ['10002']),
+            self._make_result('a.pdf', 3, ['10003']),
+            self._make_result('a.pdf', 4, ['10004', '99999']),  # One normal, one outlier
+        ]
+        validated = validate_sequence(results)
+        page4 = [r for r in validated if r['page'] == 4][0]
+        # Count occurrences of seq_outlier_conf_ -- should be exactly 1
+        count = page4['notes'].count('seq_outlier_conf_')
+        assert count <= 1, f"Should have at most 1 outlier flag, got {count}: {page4['notes']}"
+
 
 # -- Task 2: main() integration tests --
 
@@ -1599,15 +1660,13 @@ class TestMainSequenceValidation:
         pdf_file = tmp_path / 'test.pdf'
         pdf_file.write_bytes(b'dummy')
 
-        # Use moderate outlier to test that validation runs
-        # With small sample size, outlier may affect nearby points (expected statistical behavior)
         mock_results = [
             {'filename': 'test.pdf', 'page': 1, 'ids': ['10001'], 'rotation_detected': 90, 'notes': ''},
             {'filename': 'test.pdf', 'page': 2, 'ids': ['10002'], 'rotation_detected': 90, 'notes': ''},
             {'filename': 'test.pdf', 'page': 3, 'ids': ['10003'], 'rotation_detected': 90, 'notes': ''},
             {'filename': 'test.pdf', 'page': 4, 'ids': ['10004'], 'rotation_detected': 90, 'notes': ''},
             {'filename': 'test.pdf', 'page': 5, 'ids': ['10005'], 'rotation_detected': 90, 'notes': ''},
-            {'filename': 'test.pdf', 'page': 6, 'ids': ['10500'], 'rotation_detected': 270, 'notes': ''},
+            {'filename': 'test.pdf', 'page': 6, 'ids': ['99999'], 'rotation_detected': 270, 'notes': ''},
         ]
 
         with patch('precede_ocr.discover_pdfs', return_value=[pdf_file]):
@@ -1615,16 +1674,16 @@ class TestMainSequenceValidation:
                 output_csv = tmp_path / 'results.csv'
                 main(str(tmp_path), str(output_csv))
 
-        # Read CSV and check that validation ran and flagged at least the outlier
         import csv
         with open(output_csv) as f:
             reader = csv.DictReader(f)
             rows = list(reader)
 
-        # At least ONE row should have seq_outlier flag (validation ran)
-        flagged_rows = [r for r in rows if 'seq_outlier_conf_' in r['notes']]
-        assert len(flagged_rows) > 0, "validate_sequence should flag at least one outlier"
-
-        # The outlier page (6, id 10500) should be among the flagged
+        # The extreme outlier (page 6, id 99999) should be flagged
         page6_row = [r for r in rows if r['page'] == '6'][0]
         assert 'seq_outlier_conf_' in page6_row['notes'], "Outlier ID should be flagged"
+
+        # Normal sequential IDs should NOT be flagged
+        normal_rows = [r for r in rows if r['page'] != '6']
+        for row in normal_rows:
+            assert 'seq_outlier' not in row['notes'], f"Page {row['page']} should not be flagged"
