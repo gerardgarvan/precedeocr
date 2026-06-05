@@ -45,7 +45,7 @@ Plans:
   4. OCR completes successfully regardless of page orientation
 **Plans:** 1 plan
 Plans:
-- [ ] 02-01-PLAN.md — Implement rotation reorder, debug flag, failure classification, notes column, and rotation summary
+- [x] 02-01-PLAN.md — Implement rotation reorder, debug flag, failure classification, notes column, and rotation summary
 
 ### Phase 3: Scale — Parallel Processing
 **Goal**: Process 30K+ PDFs efficiently using parallel workers with progress visibility.

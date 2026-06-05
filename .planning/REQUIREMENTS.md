@@ -11,7 +11,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [x] **PIPE-01**: User can point the tool at a directory and it recursively discovers all `.pdf` files
 - [x] **PIPE-02**: Each PDF page is converted to a high-DPI image (300+ DPI) for OCR
-- [ ] **PIPE-03**: OCR runs across multiple rotations (0/90/180/270 degrees) per page, keeping whichever rotation yields a regex match
+- [x] **PIPE-03**: OCR runs across multiple rotations (0/90/180/270 degrees) per page, keeping whichever rotation yields a regex match
 - [x] **PIPE-04**: 5-digit numeric IDs are extracted from OCR output via regex pattern
 - [x] **PIPE-05**: Each extracted ID is mapped to its source filename and page number
 - [ ] **PIPE-06**: Multiple IDs on a single page are all captured
@@ -76,7 +76,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 |-------------|-------|--------|
 | PIPE-01 | Phase 1 | Complete |
 | PIPE-02 | Phase 1 | Complete |
-| PIPE-03 | Phase 2 | Pending |
+| PIPE-03 | Phase 2 | Complete |
 | PIPE-04 | Phase 1 | Complete |
 | PIPE-05 | Phase 1 | Complete |
 | PIPE-06 | Phase 3 | Pending |
