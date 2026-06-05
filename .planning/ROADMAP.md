@@ -89,7 +89,7 @@ Plans:
 Plans:
 - [x] 05-01-PLAN.md — Conditional preprocessing fallback: install OpenCV, add preprocess_image(), wire into extract_id_with_rotation()
 - [x] 05-02-PLAN.md — Sequential ID validation: add validate_sequence() with linear regression + MAD outlier detection, wire into main()
-- [ ] 05-03-PLAN.md — Gap closure: fix validate_sequence() to use Theil-Sen robust regression, correct outlier flagging and confidence scoring
+- [x] 05-03-PLAN.md — Gap closure: fix validate_sequence() to use Theil-Sen robust regression, correct outlier flagging and confidence scoring
 
 ## Progress
 
