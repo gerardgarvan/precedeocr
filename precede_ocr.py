@@ -2,15 +2,17 @@
 Precede OCR - Single-file PDF ID extraction pipeline.
 
 Extracts 5-digit numeric Precede IDs from PDF pages using multi-rotation OCR.
-Outputs structured CSV mapping each ID to its source filename and page number.
+Outputs structured CSV and JSON mapping each ID to its source filename and page number.
 """
 
 import re
 import sys
+import json
 import argparse
 import shutil
 import tempfile
 from pathlib import Path
+from collections import defaultdict
 from PIL import Image
 import pytesseract
 import pandas as pd
@@ -106,6 +108,8 @@ def select_most_likely_id(matches: list[str]) -> str | None:
     Per user decision D-03: Filter out trivial/repeating patterns like
     00000, 11111, etc. If multiple valid candidates remain, select first.
 
+    Deprecated: Use select_all_valid_ids() for multi-ID extraction.
+
     Args:
         matches: List of 5-digit strings from regex matching
 
@@ -129,6 +133,27 @@ def select_most_likely_id(matches: list[str]) -> str | None:
     else:
         # No matches at all
         return None
+
+
+def select_all_valid_ids(matches: list[str]) -> list[str]:
+    """
+    Filter and return ALL valid Precede IDs from matches.
+
+    Per D-02: Return all valid candidates from the successful rotation.
+    Per D-03: Filter trivial/repeating patterns (00000, 11111, etc.).
+    Unlike select_most_likely_id, does NOT fall back to trivial matches.
+
+    Args:
+        matches: List of 5-digit strings from regex matching
+
+    Returns:
+        List of valid ID strings (may be empty)
+    """
+    trivial_patterns = {
+        '00000', '11111', '22222', '33333', '44444',
+        '55555', '66666', '77777', '88888', '99999'
+    }
+    return [m for m in matches if m not in trivial_patterns]
 
 
 def classify_failure_reason(ocr_texts: list[str]) -> str:
@@ -160,13 +185,15 @@ def classify_failure_reason(ocr_texts: list[str]) -> str:
         return 'no_match_any_rotation'
 
 
-def extract_id_with_rotation(image: Image.Image, debug: bool = False) -> tuple[str | None, int | None, str]:
+def extract_id_with_rotation(image: Image.Image, debug: bool = False) -> tuple[list[str], int | None, str]:
     """
-    Extract 5-digit ID by trying OCR at all 4 rotations with early exit.
+    Extract 5-digit IDs by trying OCR at all 4 rotations with early exit.
 
     Per Phase 2 decisions D-08, D-09: Try rotations [90, 270, 0, 180] sequentially.
-    Exit loop on first valid 5-digit match (saves compute). 90-first order eliminates
-    false positives from 0-degree matches (page numbers, dates).
+    Exit loop on first rotation that yields valid 5-digit matches (saves compute).
+    90-first order eliminates false positives from 0-degree matches (page numbers, dates).
+
+    Per Phase 3 D-02: Returns ALL valid IDs from the successful rotation, not just first.
 
     Uses PSM 6 (uniform text block) as middle ground for full-page scans with
     isolated IDs. OEM 3 (LSTM engine). Digit whitelist restricts output.
@@ -176,8 +203,8 @@ def extract_id_with_rotation(image: Image.Image, debug: bool = False) -> tuple[s
         debug: If True, print raw OCR text to stderr for each rotation
 
     Returns:
-        Tuple of (id_string, rotation_angle, notes) where notes is '' for success
-        or failure reason for no match
+        Tuple of (ids_list, rotation_angle, notes) where ids_list is a list of
+        valid ID strings, and notes is '' for success or failure reason for no match
     """
     ocr_texts = []  # Collect OCR text for failure classification
 
@@ -208,14 +235,14 @@ def extract_id_with_rotation(image: Image.Image, debug: bool = False) -> tuple[s
         matches = re.findall(r'\b\d{5}\b', normalized_text)
 
         if matches:
-            # Early exit on first valid match
-            selected_id = select_most_likely_id(matches)
-            if selected_id is not None:
-                return selected_id, angle, ''  # D-09: Early exit with empty notes
+            # D-02: Return ALL valid IDs from this rotation
+            selected_ids = select_all_valid_ids(matches)
+            if selected_ids:
+                return selected_ids, angle, ''  # D-09: Early exit with empty notes
 
     # D-12: No match found - classify failure reason
     reason = classify_failure_reason(ocr_texts)
-    return None, None, reason
+    return [], None, reason
 
 
 def process_single_pdf(pdf_path: str, debug: bool = False) -> list[dict]:
@@ -223,11 +250,11 @@ def process_single_pdf(pdf_path: str, debug: bool = False) -> list[dict]:
     End-to-end pipeline for one PDF file.
 
     Implements PIPE-01 (single file), PIPE-02 (300 DPI), PIPE-04 (regex),
-    PIPE-05 (mapping), per user decisions D-04 (rotation), D-06 (all pages).
+    PIPE-05 (mapping), PIPE-06 (multiple IDs per page), PIPE-07 (no-ID flagging).
 
     Steps:
     1. Convert PDF to 300 DPI images (disk-backed to prevent OOM)
-    2. For each page: run multi-rotation OCR to extract ID
+    2. For each page: run multi-rotation OCR to extract all IDs
     3. Record result for every page (even pages with no ID found)
     4. Clean up temporary image files
 
@@ -236,7 +263,8 @@ def process_single_pdf(pdf_path: str, debug: bool = False) -> list[dict]:
         debug: If True, print raw OCR text to stderr for debugging
 
     Returns:
-        List of dicts with keys: filename, page, id, rotation_detected, notes
+        List of dicts with keys: filename, page, ids, rotation_detected, notes
+        where ids is a list of valid ID strings (may be empty for no-match pages)
     """
     # Create temporary directory for image files
     temp_dir = tempfile.mkdtemp(prefix='precede_ocr_')
@@ -260,16 +288,16 @@ def process_single_pdf(pdf_path: str, debug: bool = False) -> list[dict]:
         for page_num, image_path in enumerate(image_paths, start=1):
             # Open image with context manager for proper cleanup (Pitfall 5)
             with Image.open(image_path) as img:
-                # Extract ID with multi-rotation OCR
-                id_found, rotation, notes = extract_id_with_rotation(img, debug=debug)
+                # Extract IDs with multi-rotation OCR
+                ids_found, rotation, notes = extract_id_with_rotation(img, debug=debug)
 
                 # Record result (D-06: row for EVERY page, even no-match)
                 results.append({
                     'filename': filename,
                     'page': page_num,
-                    'id': id_found,           # None if no match - will be blank in CSV
-                    'rotation_detected': rotation if id_found else None,
-                    'notes': notes            # D-12: Failure reason or empty string
+                    'ids': ids_found,             # List of IDs (empty if no match)
+                    'rotation_detected': rotation if ids_found else None,
+                    'notes': notes                # D-12: Failure reason or empty string
                 })
 
         return results
@@ -281,20 +309,44 @@ def process_single_pdf(pdf_path: str, debug: bool = False) -> list[dict]:
 
 def write_results_csv(results: list[dict], output_path: str) -> None:
     """
-    Write results to CSV per OUT-01 and Phase 2 D-12.
+    Write results to CSV per OUT-01, D-01, and Phase 2 D-12.
+
+    Per D-01: One row per ID. Same page appears in multiple rows when it has
+    multiple IDs. Pages with no IDs get one row with blank id column.
 
     Creates CSV with explicit column order: filename, page, id, rotation_detected, notes.
     Includes summary statistics on stdout.
 
     Args:
-        results: List of dicts from process_single_pdf()
+        results: List of dicts from process_single_pdf() with 'ids' key (list)
         output_path: Path to output CSV file
     """
     # Create output directory if needed
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
+    # Flatten multi-ID results to one row per ID (D-01)
+    flattened = []
+    for r in results:
+        if r['ids']:
+            for id_val in r['ids']:
+                flattened.append({
+                    'filename': r['filename'],
+                    'page': r['page'],
+                    'id': id_val,
+                    'rotation_detected': r['rotation_detected'],
+                    'notes': r['notes']
+                })
+        else:
+            flattened.append({
+                'filename': r['filename'],
+                'page': r['page'],
+                'id': '',
+                'rotation_detected': r['rotation_detected'],
+                'notes': r['notes']
+            })
+
     # Create DataFrame
-    df = pd.DataFrame(results)
+    df = pd.DataFrame(flattened)
 
     # Enforce column order per D-12: includes notes column
     df = df[['filename', 'page', 'id', 'rotation_detected', 'notes']]
@@ -303,14 +355,41 @@ def write_results_csv(results: list[dict], output_path: str) -> None:
     df.to_csv(output_path, index=False)
 
     # Print summary
-    total_pages = len(df)
-    ids_found = df['id'].notna().sum()
-    no_id = df['id'].isna().sum()
+    total_pages = len(results)
+    ids_found = sum(len(r['ids']) for r in results)
+    no_id = sum(1 for r in results if not r['ids'])
 
     print(f"Results written to {output_path}")
     print(f"Total pages scanned: {total_pages}")
     print(f"IDs found: {ids_found}")
     print(f"Pages with no ID: {no_id}")
+
+
+def write_results_json(results: list[dict], output_path: str) -> None:
+    """
+    Write results to nested JSON per OUT-02 and D-04.
+
+    Structure: {"file.pdf": {"1": ["12345"], "2": ["67890", "11234"], "3": []}}
+    Pages with no ID show as empty array (per D-04, PIPE-07).
+    Page keys are strings (JSON keys must be strings).
+
+    Args:
+        results: List of dicts from process_single_pdf() with 'ids' key (list)
+        output_path: Path to output JSON file
+    """
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    nested = defaultdict(dict)
+    for row in results:
+        filename = row['filename']
+        page = str(row['page'])
+        ids = row['ids']
+        nested[filename][page] = ids
+
+    with open(output_path, 'w') as f:
+        json.dump(dict(nested), f, indent=2)
+
+    print(f"JSON output written to {output_path}")
 
 
 def print_rotation_summary(results: list[dict]) -> None:
@@ -346,6 +425,8 @@ if __name__ == '__main__':
     parser.add_argument('pdf_path', help='Path to input PDF file')
     parser.add_argument('output_path', nargs='?', default='output/results.csv',
                         help='Path to output CSV (default: output/results.csv)')
+    parser.add_argument('--output-json', default=None,
+                        help='Path to output JSON (default: same dir as CSV with .json extension)')
     parser.add_argument('--debug', action='store_true',
                         help='Print raw OCR text for each rotation to stderr')
     args = parser.parse_args()
@@ -357,5 +438,12 @@ if __name__ == '__main__':
     print(f"Processing {args.pdf_path}...")
     results = process_single_pdf(args.pdf_path, debug=args.debug)
     write_results_csv(results, args.output_path)
+
+    # Per D-05: always generate both CSV and JSON
+    json_path = args.output_json
+    if json_path is None:
+        json_path = str(Path(args.output_path).with_suffix('.json'))
+    write_results_json(results, json_path)
+
     print_rotation_summary(results)
     print("Done.")
