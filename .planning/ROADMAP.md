@@ -12,7 +12,7 @@ Reliably extract every Precede ID from every page across 30K+ PDFs so the user c
 ## Phases
 
 - [x] **Phase 1: Foundation** - Single-file OCR pipeline that extracts IDs from one PDF
-- [ ] **Phase 2: Rotation Handling** - Multi-angle OCR for rotated IDs (0/90/180/270 degrees)
+- [x] **Phase 2: Rotation Handling** - Multi-angle OCR for rotated IDs (0/90/180/270 degrees)
 - [ ] **Phase 3: Scale** - Parallel processing for 30K+ PDFs with progress tracking
 - [ ] **Phase 4: Resilience** - Error handling, retry logic, and resume capability
 - [ ] **Phase 5: Quality** - Conditional preprocessing and character normalization
@@ -43,7 +43,7 @@ Plans:
   2. The tool tries all 4 rotations and returns the first valid ID match
   3. Detected rotation angle is tracked in output (CSV includes rotation_detected column)
   4. OCR completes successfully regardless of page orientation
-**Plans:** 1 plan
+**Plans:** 1/1 plans executed
 Plans:
 - [x] 02-01-PLAN.md — Implement rotation reorder, debug flag, failure classification, notes column, and rotation summary
 
@@ -57,7 +57,10 @@ Plans:
   3. Pages where no ID is found are flagged in output (not silently dropped)
   4. Results are written as JSON mapping filename to pages to IDs
   5. Progress is displayed with file count, percentage complete, and ETA
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 03-01-PLAN.md — Multi-ID extraction, data contract change, JSON output writer
+- [ ] 03-02-PLAN.md — Parallel processing with multiprocessing.Pool, directory CLI, tqdm progress
 
 ### Phase 4: Resilience — Error Handling & Checkpointing
 **Goal**: Complete 30K batches even with corrupted files or crashes, resuming from last successful file.
@@ -86,8 +89,8 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation | 2/2 | Complete | 2026-06-04 |
-| 2. Rotation Handling | 0/1 | Planning complete | - |
-| 3. Scale | 0/0 | Not started | - |
+| 2. Rotation Handling | 1/1 | Complete | 2026-06-05 |
+| 3. Scale | 0/2 | Planning complete | - |
 | 4. Resilience | 0/0 | Not started | - |
 | 5. Quality | 0/0 | Not started | - |
 
