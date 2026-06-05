@@ -26,7 +26,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [ ] **QUAL-01**: Low-quality scans are preprocessed (grayscale, threshold, denoise) as a fallback when initial OCR finds no match
 - [ ] **QUAL-02**: Common OCR digit confusion (O/0, I/1, S/5) is normalized before regex matching
-- [ ] **QUAL-03**: Per-file error handling ensures a single failed file does not crash the entire batch
+- [x] **QUAL-03**: Per-file error handling ensures a single failed file does not crash the entire batch
 
 ### Resilience
 
@@ -85,7 +85,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OUT-02 | Phase 3 | Complete |
 | QUAL-01 | Phase 5 | Pending |
 | QUAL-02 | Phase 5 | Pending |
-| QUAL-03 | Phase 4 | Pending |
+| QUAL-03 | Phase 4 | Complete |
 | RESL-01 | Phase 4 | Pending |
 | PROG-01 | Phase 3 | Complete |
 

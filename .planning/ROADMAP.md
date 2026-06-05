@@ -73,7 +73,7 @@ Plans:
   4. User can review batch statistics (total files, successful, failed, IDs found)
 **Plans:** 2 plans
 Plans:
-- [ ] 04-01-PLAN.md — Resilience utility functions: retry decorator, error logging, checkpoint save/load, batch stats
+- [x] 04-01-PLAN.md — Resilience utility functions: retry decorator, error logging, checkpoint save/load, batch stats
 - [ ] 04-02-PLAN.md — Wire resilience into pipeline: checkpoint in process loop, resume in main, --fresh flag, stats output
 
 ### Phase 5: Quality — Conditional Preprocessing & Validation
