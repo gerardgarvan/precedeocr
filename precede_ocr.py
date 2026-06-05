@@ -76,6 +76,10 @@ if POPPLER_PATH is None:
     print(f"  Recursive search in: {Path.home() / 'poppler'}")
     print("Set POPPLER_PATH manually in precede_ocr.py or add Poppler to PATH.")
 
+# Module-level config for multiprocessing workers (set by main before pool spawn)
+_ERROR_LOG_PATH = None
+_CHECKPOINT_FREQUENCY = 50
+
 
 def normalize_digits(text: str) -> str:
     """
@@ -589,22 +593,30 @@ def print_batch_stats(stats: dict) -> None:
     print("=" * 60)
 
 
+def _process_single_pdf_with_retry(pdf_path_str: str, debug: bool = False) -> list[dict]:
+    """Core processing wrapped with retry_once decorator."""
+    return process_single_pdf(pdf_path_str, debug=debug)
+
+
+_process_single_pdf_with_retry = retry_once(_process_single_pdf_with_retry)
+
+
 def process_single_pdf_wrapper(pdf_path: Path) -> list[dict]:
     """
-    Wrapper for multiprocessing: converts Path to str, handles errors.
+    Wrapper for multiprocessing: retry once, log errors per D-09/D-10/D-11.
 
     Must be top-level function for Windows spawn pickling.
-
-    Args:
-        pdf_path: Path object for PDF file
-
-    Returns:
-        List of result dicts (one per page), or error dict if processing fails
+    Uses module-level _ERROR_LOG_PATH set by main() before pool creation.
     """
     try:
-        results = process_single_pdf(str(pdf_path), debug=False)
+        results = _process_single_pdf_with_retry(str(pdf_path), debug=False)
         return results
     except Exception as e:
+        # Log to errors.log (D-09)
+        if _ERROR_LOG_PATH is not None:
+            log_error_to_file(pdf_path.name, e, Path(_ERROR_LOG_PATH))
+
+        # Return error dict for CSV notes column (D-10)
         return [{
             'filename': pdf_path.name,
             'page': 0,
@@ -614,33 +626,46 @@ def process_single_pdf_wrapper(pdf_path: Path) -> list[dict]:
         }]
 
 
-def process_all_pdfs(pdf_paths: list[Path], workers: int) -> list[dict]:
+def process_all_pdfs(pdf_paths: list[Path], workers: int,
+                     checkpointed_results: list[dict] | None = None,
+                     checkpoint_path: Path | None = None,
+                     input_path: str = '',
+                     checkpoint_frequency: int = 50) -> list[dict]:
     """
-    Process all PDFs in parallel with progress bar and running stats.
+    Process all PDFs in parallel with progress bar, running stats, and periodic checkpointing.
 
-    Per D-06: workers default cpu_count()-1, overridable.
-    Per D-07: maxtasksperchild=50 for process recycling.
-    Per D-08: tqdm per-file progress bar with ETA.
-    Per D-09: Running stats in tqdm postfix (IDs found, no-ID pages, errors).
+    Per D-03: Saves checkpoint every checkpoint_frequency files (default 50).
+    Per D-04: Returns merged results (checkpointed + newly processed).
+    Per D-14: Tracks resume-aware metrics (checkpointed vs newly processed counts).
 
     Args:
-        pdf_paths: List of PDF file paths
+        pdf_paths: List of REMAINING PDF file paths (already filtered)
         workers: Number of worker processes
+        checkpointed_results: Previously checkpointed results to merge (default: empty)
+        checkpoint_path: Path to .checkpoint.json file (None = no checkpointing)
+        input_path: Original input path string (stored in checkpoint metadata)
+        checkpoint_frequency: Save checkpoint every N files (default 50, per D-03 Claude's discretion)
 
     Returns:
-        Flat list of all result dicts from all files
+        Flat list of ALL result dicts (checkpointed + new)
     """
-    all_results = []
+    if checkpointed_results is None:
+        checkpointed_results = []
+
+    all_results = list(checkpointed_results)  # Copy to avoid mutating input
+    processed_files = {r['filename'] for r in checkpointed_results}
+    files_since_checkpoint = 0
     stats = {'ids': 0, 'no_id_pages': 0, 'errors': 0}
 
-    # Calculate chunksize for efficient IPC distribution
+    # Calculate total for progress bar (remaining + already done)
+    total_files = len(pdf_paths) + len(checkpointed_results)
+
     chunksize = max(1, len(pdf_paths) // (4 * workers))
 
-    # Create pool with process recycling (D-07: maxtasksperchild=50)
     with mp.Pool(processes=workers, maxtasksperchild=50) as pool:
-        # Per D-08: tqdm per-file progress bar
         pbar = tqdm(
-            total=len(pdf_paths),
+            total=total_files,
+            initial=len(checkpointed_results),  # Resume offset
             desc="Processing PDFs",
             unit="file"
         )
@@ -652,6 +677,11 @@ def process_all_pdfs(pdf_paths: list[Path], workers: int) -> list[dict]:
         ):
             all_results.extend(file_results)
 
+            # Track processed file
+            if file_results:
+                processed_files.add(file_results[0]['filename'])
+            files_since_checkpoint += 1
+
             # Update running stats (D-09)
             for r in file_results:
                 if r['page'] == 0 and 'error:' in r.get('notes', ''):
@@ -661,7 +691,14 @@ def process_all_pdfs(pdf_paths: list[Path], workers: int) -> list[dict]:
                 else:
                     stats['no_id_pages'] += 1
 
-            # Update progress bar
+            # Periodic checkpoint save (per D-03: every checkpoint_frequency files)
+            if checkpoint_path and files_since_checkpoint >= checkpoint_frequency:
+                save_checkpoint_atomic(
+                    all_results, processed_files, input_path,
+                    checkpoint_path, checkpoint_frequency
+                )
+                files_since_checkpoint = 0
+
             pbar.update(1)
             pbar.set_postfix({
                 'IDs': stats['ids'],
@@ -671,13 +708,20 @@ def process_all_pdfs(pdf_paths: list[Path], workers: int) -> list[dict]:
 
         pbar.close()
 
+    # Final checkpoint save (ensure all results persisted)
+    if checkpoint_path:
+        save_checkpoint_atomic(
+            all_results, processed_files, input_path,
+            checkpoint_path, checkpoint_frequency
+        )
+
     return all_results
 
 
 def main(input_path: str, output_csv: str, output_json: str | None = None,
-         workers: int | None = None, debug: bool = False) -> None:
+         workers: int | None = None, debug: bool = False, fresh: bool = False) -> None:
     """
-    Main entry point: discover PDFs, process (serial or parallel), write outputs.
+    Main entry point: discover PDFs, handle checkpoint/resume, process, write outputs + stats.
 
     Args:
         input_path: Path to PDF file or directory of PDFs
@@ -685,7 +729,29 @@ def main(input_path: str, output_csv: str, output_json: str | None = None,
         output_json: Path to output JSON file (default: CSV path with .json extension)
         workers: Number of parallel workers (None = cpu_count()-1 for dirs, 1 for single file)
         debug: Enable debug OCR output to stderr (single file only)
+        fresh: Delete existing checkpoint and start from scratch (D-07)
     """
+    global _ERROR_LOG_PATH
+
+    # Determine output directory from CSV path
+    output_dir = Path(output_csv).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = output_dir / '.checkpoint.json'
+    error_log_path = output_dir / 'errors.log'
+    stats_path = output_dir / 'batch_stats.json'
+
+    # Set module-level error log path for workers
+    _ERROR_LOG_PATH = str(error_log_path)
+
+    # D-07: --fresh flag deletes checkpoint and error log
+    if fresh:
+        if checkpoint_path.exists():
+            checkpoint_path.unlink()
+            print("Deleted existing checkpoint (--fresh mode)")
+        if error_log_path.exists():
+            error_log_path.unlink()
+            print("Deleted existing error log (--fresh mode)")
+
     # Discover PDF files
     pdf_paths = discover_pdfs(input_path)
 
@@ -699,21 +765,80 @@ def main(input_path: str, output_csv: str, output_json: str | None = None,
     if output_json is None:
         output_json = str(Path(output_csv).with_suffix('.json'))
 
-    # Single file: process directly (preserves debug mode)
-    if len(pdf_paths) == 1:
-        print(f"Processing {pdf_paths[0].name}...")
-        all_results = process_single_pdf(str(pdf_paths[0]), debug=debug)
-    else:
-        # Multiple files: parallel processing
-        if workers is None:
-            workers = max(1, mp.cpu_count() - 1)  # D-06: cpu_count()-1 default
-        print(f"Processing with {workers} workers...")
-        all_results = process_all_pdfs(pdf_paths, workers=workers)
+    # D-05: Auto-detect checkpoint for resume
+    checkpointed_results = []
+    processed_files = set()
+    if not fresh:
+        checkpoint_data = load_checkpoint_if_exists(output_dir, input_path)
+        if checkpoint_data:
+            checkpointed_results, processed_files = checkpoint_data
+            pdf_paths = filter_remaining_pdfs(pdf_paths, processed_files)
+            if not pdf_paths:
+                print("All files already processed. Use --fresh to reprocess.")
+                # Still write outputs from checkpoint data
+                all_results = checkpointed_results
+                write_results_csv(all_results, output_csv)
+                write_results_json(all_results, output_json)
+                print_rotation_summary(all_results)
+                print("Done.")
+                return
 
-    # Write both outputs (D-05)
+    # Start timing for batch stats
+    start_time = time_module.time()
+
+    # Single file: process directly (preserves debug mode, no checkpointing needed)
+    if len(pdf_paths) == 1 and not checkpointed_results:
+        print(f"Processing {pdf_paths[0].name}...")
+        try:
+            all_results = _process_single_pdf_with_retry(str(pdf_paths[0]), debug=debug)
+        except Exception as e:
+            log_error_to_file(pdf_paths[0].name, e, error_log_path)
+            all_results = [{
+                'filename': pdf_paths[0].name,
+                'page': 0,
+                'ids': [],
+                'rotation_detected': None,
+                'notes': f'error: {type(e).__name__}: {str(e)}'
+            }]
+    else:
+        # Multiple files (or resuming): parallel processing with checkpointing
+        if workers is None:
+            workers = max(1, mp.cpu_count() - 1)
+        print(f"Processing {len(pdf_paths)} remaining file(s) with {workers} workers...")
+        all_results = process_all_pdfs(
+            pdf_paths, workers=workers,
+            checkpointed_results=checkpointed_results,
+            checkpoint_path=checkpoint_path,
+            input_path=input_path,
+            checkpoint_frequency=_CHECKPOINT_FREQUENCY
+        )
+
+    # Write outputs (D-04: merged checkpointed + new results)
     write_results_csv(all_results, output_csv)
     write_results_json(all_results, output_json)
     print_rotation_summary(all_results)
+
+    # D-12, D-13, D-14: Batch statistics (console + JSON file)
+    # Per D-14: resume-aware stats distinguish previously-checkpointed vs newly-processed
+    newly_processed_count = len(set(r['filename'] for r in all_results)) - len(
+        set(r['filename'] for r in checkpointed_results)) if checkpointed_results else len(
+        set(r['filename'] for r in all_results))
+    stats = calculate_batch_stats(
+        all_results,
+        checkpointed_count=len(set(r['filename'] for r in checkpointed_results)),
+        newly_processed_count=newly_processed_count,
+        start_time=start_time
+    )
+    print_batch_stats(stats)
+
+    # Write batch_stats.json (D-12)
+    with open(stats_path, 'w') as f:
+        json.dump(stats, f, indent=2)
+    print(f"\nBatch statistics written to {stats_path}")
+
+    # Clean up checkpoint after successful completion
+    # (keep it — user may want to inspect; next run with --fresh clears it)
+
     print("Done.")
 
 
@@ -728,6 +853,8 @@ if __name__ == '__main__':
                         help='Number of parallel workers (default: cpu_count()-1)')
     parser.add_argument('--debug', action='store_true',
                         help='Print raw OCR text for each rotation to stderr (single file only)')
+    parser.add_argument('--fresh', action='store_true',
+                        help='Delete existing checkpoint and start from scratch')
     args = parser.parse_args()
 
-    main(args.input_path, args.output_csv, args.output_json, args.workers, args.debug)
+    main(args.input_path, args.output_csv, args.output_json, args.workers, args.debug, args.fresh)
