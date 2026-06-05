@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: Ready to plan
-last_updated: "2026-06-05T13:37:25.995Z"
+status: Ready to execute
+last_updated: "2026-06-05T14:37:32.708Z"
 progress:
   total_phases: 5
   completed_phases: 2
-  total_plans: 3
-  completed_plans: 3
+  total_plans: 5
+  completed_plans: 4
 ---
 
 # Project State: Precede OCR
@@ -24,10 +24,10 @@ progress:
 
 ## Current Position
 
-Phase: 3
-Plan: Not started
+Phase: 03 (scale-parallel-processing) — EXECUTING
+Plan: 2 of 2
 **Status**: Phase 1 complete. Ready to plan Phase 2.
-**Progress**: `[██████████] 100%` (1/5 phases complete, Phase 1 done)
+**Progress**: `[████████░░] 80%` (4/5 plans complete)
 
 ## Performance Metrics
 
@@ -40,6 +40,7 @@ Plan: Not started
 | Phase 01 P01 | 4 | 2 tasks | 2 files |
 | Phase 01 P02 | 5h | 2 tasks | 5 files |
 | Phase 02 P01 | 4 | 1 tasks | 3 files |
+| Phase 03 P01 | 5min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -58,6 +59,10 @@ Plan: Not started
 | Auto-detect Tesseract/Poppler paths | Search common Windows install locations instead of hardcoding | Phase 1 | Complete |
 | Recursive Poppler search | Handle versioned subdirectory installs (poppler-24.08.0/Library/bin) | Phase 1 | Complete |
 | Baseline OCR accuracy 94.9% | 37/39 IDs from 39-page test PDF; acceptable for foundation | Phase 1 | Complete |
+| Multi-ID data contract: 'ids' list replaces 'id' | Return all valid IDs per page, not just first match | Phase 3 | Complete |
+| CSV flattens multi-ID pages to one row per ID (D-01) | Same page appears in multiple rows when it has multiple IDs | Phase 3 | Complete |
+| JSON nested {filename: {page: [ids]}} (D-04) | Empty arrays for no-ID pages; natural for browsing by file | Phase 3 | Complete |
+| Both CSV and JSON always generated (D-05) | Both are lightweight to produce, no flags needed | Phase 3 | Complete |
 
 ### Active TODOs
 
@@ -82,21 +87,20 @@ None currently. Research complete, roadmap approved, ready for planning.
 
 ### What Just Happened
 
-Phase 1 complete. Plan 02 finished: test infrastructure created (25 unit tests, all passing) and real-PDF validation confirmed (37/39 IDs extracted from 39-page PDF). Two path-detection fixes committed during real-PDF testing (be433b7, cb258db).
+Phase 3 Plan 01 complete. Multi-ID data contract implemented: pipeline now returns all valid IDs per page as a list. CSV flattens multi-ID pages to one row per ID. JSON output added with nested {filename: {page: [ids]}} structure. 60 tests passing.
 
 ### What's Next
 
-Plan and execute Phase 2 (Rotation Handling) to optimize multi-angle OCR.
+Execute Phase 3 Plan 02: parallelization with multiprocessing, directory scanning, progress bars.
 
 ### Context for Next Session
 
-- Phase 1 fully complete: pipeline + tests + real-PDF validation
-- Complete OCR pipeline in precede_ocr.py with auto-detected Tesseract/Poppler paths
-- 25 unit tests in tests/test_precede_ocr.py (all passing)
-- Baseline accuracy: 94.9% (37/39 IDs from 39-page test PDF)
-- All 5 core functions working: normalize_digits, select_most_likely_id, extract_id_with_rotation, process_single_pdf, write_results_csv
-- Plan 1 SUMMARY: `.planning/phases/01-foundation-single-file-ocr-pipeline/01-01-SUMMARY.md`
-- Plan 2 SUMMARY: `.planning/phases/01-foundation-single-file-ocr-pipeline/01-02-SUMMARY.md`
+- Phase 3 Plan 01 complete: multi-ID + JSON output
+- Data contract changed from 'id': str|None to 'ids': list[str]
+- 7 core functions: normalize_digits, select_most_likely_id, select_all_valid_ids, extract_id_with_rotation, process_single_pdf, write_results_csv, write_results_json
+- 60 tests in tests/test_precede_ocr.py (all passing)
+- process_single_pdf() is self-contained worker ready for parallelization
+- Plan 01 SUMMARY: `.planning/phases/03-scale-parallel-processing/03-01-SUMMARY.md`
 
 ---
 *This file is updated by transition workflows and serves as project memory.*

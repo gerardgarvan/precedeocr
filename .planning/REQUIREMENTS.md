@@ -14,13 +14,13 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **PIPE-03**: OCR runs across multiple rotations (0/90/180/270 degrees) per page, keeping whichever rotation yields a regex match
 - [x] **PIPE-04**: 5-digit numeric IDs are extracted from OCR output via regex pattern
 - [x] **PIPE-05**: Each extracted ID is mapped to its source filename and page number
-- [ ] **PIPE-06**: Multiple IDs on a single page are all captured
-- [ ] **PIPE-07**: Pages where no ID is found are flagged in output (not silently dropped)
+- [x] **PIPE-06**: Multiple IDs on a single page are all captured
+- [x] **PIPE-07**: Pages where no ID is found are flagged in output (not silently dropped)
 
 ### Output
 
 - [x] **OUT-01**: Results are written as CSV with columns: filename, id, page, rotation_detected
-- [ ] **OUT-02**: Results are written as JSON mapping filename to pages to IDs
+- [x] **OUT-02**: Results are written as JSON mapping filename to pages to IDs
 
 ### Quality
 
@@ -79,10 +79,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PIPE-03 | Phase 2 | Complete |
 | PIPE-04 | Phase 1 | Complete |
 | PIPE-05 | Phase 1 | Complete |
-| PIPE-06 | Phase 3 | Pending |
-| PIPE-07 | Phase 3 | Pending |
+| PIPE-06 | Phase 3 | Complete |
+| PIPE-07 | Phase 3 | Complete |
 | OUT-01 | Phase 1 | Complete |
-| OUT-02 | Phase 3 | Pending |
+| OUT-02 | Phase 3 | Complete |
 | QUAL-01 | Phase 5 | Pending |
 | QUAL-02 | Phase 5 | Pending |
 | QUAL-03 | Phase 4 | Pending |
