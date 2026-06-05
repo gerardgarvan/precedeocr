@@ -16,7 +16,7 @@ def temp_dir():
 def sample_results():
     """Sample pipeline results for CSV output testing."""
     return [
-        {'filename': 'test.pdf', 'page': 1, 'id': '12345', 'rotation_detected': 90},
-        {'filename': 'test.pdf', 'page': 2, 'id': None, 'rotation_detected': None},
-        {'filename': 'test.pdf', 'page': 3, 'id': '67890', 'rotation_detected': 0},
+        {'filename': 'test.pdf', 'page': 1, 'id': '12345', 'rotation_detected': 90, 'notes': ''},
+        {'filename': 'test.pdf', 'page': 2, 'id': None, 'rotation_detected': None, 'notes': 'no_text_detected'},
+        {'filename': 'test.pdf', 'page': 3, 'id': '67890', 'rotation_detected': 0, 'notes': ''},
     ]

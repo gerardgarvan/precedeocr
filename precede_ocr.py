@@ -7,6 +7,7 @@ Outputs structured CSV mapping each ID to its source filename and page number.
 
 import re
 import sys
+import argparse
 import shutil
 import tempfile
 from pathlib import Path
@@ -130,23 +131,57 @@ def select_most_likely_id(matches: list[str]) -> str | None:
         return None
 
 
-def extract_id_with_rotation(image: Image.Image) -> tuple[str | None, int | None]:
+def classify_failure_reason(ocr_texts: list[str]) -> str:
+    """
+    Classify why no valid ID was found after trying all rotations.
+
+    Args:
+        ocr_texts: Raw OCR text from each rotation attempt
+
+    Returns:
+        Concise failure reason: 'no_text_detected', 'only_noise_matches',
+        or 'no_match_any_rotation'
+    """
+    # Check if any rotation returned text
+    has_any_text = any(text.strip() for text in ocr_texts)
+
+    if not has_any_text:
+        return 'no_text_detected'
+
+    # Check if any rotation had 5-digit numbers (even if filtered as noise)
+    all_normalized = [normalize_digits(text) for text in ocr_texts]
+    all_matches = []
+    for text in all_normalized:
+        all_matches.extend(re.findall(r'\b\d{5}\b', text))
+
+    if all_matches:
+        return 'only_noise_matches'
+    else:
+        return 'no_match_any_rotation'
+
+
+def extract_id_with_rotation(image: Image.Image, debug: bool = False) -> tuple[str | None, int | None, str]:
     """
     Extract 5-digit ID by trying OCR at all 4 rotations with early exit.
 
-    Per user decision D-04: Try rotations 0, 90, 180, 270 degrees sequentially.
-    Exit loop on first valid 5-digit match (saves 75% compute vs. trying all).
+    Per Phase 2 decisions D-08, D-09: Try rotations [90, 270, 0, 180] sequentially.
+    Exit loop on first valid 5-digit match (saves compute). 90-first order eliminates
+    false positives from 0-degree matches (page numbers, dates).
 
     Uses PSM 6 (uniform text block) as middle ground for full-page scans with
     isolated IDs. OEM 3 (LSTM engine). Digit whitelist restricts output.
 
     Args:
         image: PIL Image at 300 DPI
+        debug: If True, print raw OCR text to stderr for each rotation
 
     Returns:
-        Tuple of (id_string, rotation_angle) or (None, None) if no match
+        Tuple of (id_string, rotation_angle, notes) where notes is '' for success
+        or failure reason for no match
     """
-    for angle in [0, 90, 180, 270]:
+    ocr_texts = []  # Collect OCR text for failure classification
+
+    for angle in [90, 270, 0, 180]:  # D-08: Rotation order optimized
         # Rotate image (expand=True prevents cropping)
         if angle == 0:
             rotated_image = image
@@ -159,6 +194,13 @@ def extract_id_with_rotation(image: Image.Image) -> tuple[str | None, int | None
         # Run OCR
         text = pytesseract.image_to_string(rotated_image, config=config).strip()
 
+        # Collect OCR text for failure classification
+        ocr_texts.append(text)
+
+        # D-11: Debug output to stderr
+        if debug:
+            print(f"DEBUG [Rotation {angle}]: {repr(text)}", file=sys.stderr)
+
         # Normalize digit confusion characters
         normalized_text = normalize_digits(text)
 
@@ -169,13 +211,14 @@ def extract_id_with_rotation(image: Image.Image) -> tuple[str | None, int | None
             # Early exit on first valid match
             selected_id = select_most_likely_id(matches)
             if selected_id is not None:
-                return selected_id, angle
+                return selected_id, angle, ''  # D-09: Early exit with empty notes
 
-    # No match found after all rotations
-    return None, None
+    # D-12: No match found - classify failure reason
+    reason = classify_failure_reason(ocr_texts)
+    return None, None, reason
 
 
-def process_single_pdf(pdf_path: str) -> list[dict]:
+def process_single_pdf(pdf_path: str, debug: bool = False) -> list[dict]:
     """
     End-to-end pipeline for one PDF file.
 
@@ -190,9 +233,10 @@ def process_single_pdf(pdf_path: str) -> list[dict]:
 
     Args:
         pdf_path: Path to PDF file
+        debug: If True, print raw OCR text to stderr for debugging
 
     Returns:
-        List of dicts with keys: filename, page, id, rotation_detected
+        List of dicts with keys: filename, page, id, rotation_detected, notes
     """
     # Create temporary directory for image files
     temp_dir = tempfile.mkdtemp(prefix='precede_ocr_')
@@ -217,14 +261,15 @@ def process_single_pdf(pdf_path: str) -> list[dict]:
             # Open image with context manager for proper cleanup (Pitfall 5)
             with Image.open(image_path) as img:
                 # Extract ID with multi-rotation OCR
-                id_found, rotation = extract_id_with_rotation(img)
+                id_found, rotation, notes = extract_id_with_rotation(img, debug=debug)
 
                 # Record result (D-06: row for EVERY page, even no-match)
                 results.append({
                     'filename': filename,
                     'page': page_num,
                     'id': id_found,           # None if no match - will be blank in CSV
-                    'rotation_detected': rotation if id_found else None
+                    'rotation_detected': rotation if id_found else None,
+                    'notes': notes            # D-12: Failure reason or empty string
                 })
 
         return results
@@ -236,9 +281,9 @@ def process_single_pdf(pdf_path: str) -> list[dict]:
 
 def write_results_csv(results: list[dict], output_path: str) -> None:
     """
-    Write results to CSV per OUT-01 and D-07.
+    Write results to CSV per OUT-01 and Phase 2 D-12.
 
-    Creates CSV with explicit column order: filename, page, id, rotation_detected.
+    Creates CSV with explicit column order: filename, page, id, rotation_detected, notes.
     Includes summary statistics on stdout.
 
     Args:
@@ -251,8 +296,8 @@ def write_results_csv(results: list[dict], output_path: str) -> None:
     # Create DataFrame
     df = pd.DataFrame(results)
 
-    # Enforce column order per D-07
-    df = df[['filename', 'page', 'id', 'rotation_detected']]
+    # Enforce column order per D-12: includes notes column
+    df = df[['filename', 'page', 'id', 'rotation_detected', 'notes']]
 
     # Write CSV (index=False excludes row numbers)
     df.to_csv(output_path, index=False)
@@ -268,26 +313,49 @@ def write_results_csv(results: list[dict], output_path: str) -> None:
     print(f"Pages with no ID: {no_id}")
 
 
+def print_rotation_summary(results: list[dict]) -> None:
+    """
+    Print rotation distribution summary to console per D-13.
+
+    Shows count and percentage of pages at each rotation angle.
+    Helps validate pipeline assumptions and detect scanner orientation issues.
+
+    Args:
+        results: List of dicts from process_single_pdf()
+    """
+    if not results:
+        print("\nNo pages processed.")
+        return
+
+    df = pd.DataFrame(results)
+    rotation_counts = df['rotation_detected'].value_counts(dropna=False)
+    total_pages = len(df)
+
+    print("\nRotation distribution:")
+    for angle, count in rotation_counts.items():
+        percentage = count / total_pages * 100
+        if pd.notna(angle):
+            label = f"{int(angle)} degrees"
+        else:
+            label = "No match"
+        print(f"  {label}: {count} pages ({percentage:.1f}%)")
+
+
 if __name__ == '__main__':
-    # Parse command-line arguments
-    if len(sys.argv) < 2:
-        print("Usage: python precede_ocr.py <pdf_path> [output_csv_path]")
-        print()
-        print("Examples:")
-        print("  python precede_ocr.py test.pdf")
-        print('  python precede_ocr.py "C:\\path\\to\\document.pdf" "output/my_results.csv"')
+    parser = argparse.ArgumentParser(description='Extract Precede IDs from PDF files')
+    parser.add_argument('pdf_path', help='Path to input PDF file')
+    parser.add_argument('output_path', nargs='?', default='output/results.csv',
+                        help='Path to output CSV (default: output/results.csv)')
+    parser.add_argument('--debug', action='store_true',
+                        help='Print raw OCR text for each rotation to stderr')
+    args = parser.parse_args()
+
+    if not Path(args.pdf_path).is_file():
+        print(f"Error: PDF file not found: {args.pdf_path}")
         sys.exit(1)
 
-    pdf_path = sys.argv[1]
-    output_path = sys.argv[2] if len(sys.argv) > 2 else 'output/results.csv'
-
-    # Validate PDF file exists
-    if not Path(pdf_path).is_file():
-        print(f"Error: PDF file not found: {pdf_path}")
-        sys.exit(1)
-
-    # Run pipeline
-    print(f"Processing {pdf_path}...")
-    results = process_single_pdf(pdf_path)
-    write_results_csv(results, output_path)
+    print(f"Processing {args.pdf_path}...")
+    results = process_single_pdf(args.pdf_path, debug=args.debug)
+    write_results_csv(results, args.output_path)
+    print_rotation_summary(results)
     print("Done.")
