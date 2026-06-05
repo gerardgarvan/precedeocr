@@ -1269,3 +1269,130 @@ class TestPreprocessImage:
         img = Image.new('RGB', (300, 400), color=(128, 128, 128))
         result = preprocess_image(img)
         assert result.size == (300, 400)
+
+
+# -- Preprocessing fallback integration tests --
+
+class TestPreprocessingFallback:
+    """Tests for preprocessing fallback in extract_id_with_rotation (D-01/D-02/D-03/D-04/D-05)."""
+
+    def test_direct_success_skips_preprocessing(self):
+        """When direct OCR finds valid IDs, preprocess_image is NOT called."""
+        img = Image.new('RGB', (100, 100), color=(255, 255, 255))
+
+        with patch('precede_ocr.pytesseract.image_to_string', return_value='12345'):
+            with patch('precede_ocr.preprocess_image') as mock_preprocess:
+                ids, angle, notes = extract_id_with_rotation(img)
+
+                mock_preprocess.assert_not_called()
+                assert ids == ['12345']
+                assert notes == ''
+
+    def test_preprocessing_triggered_on_no_text(self):
+        """When direct OCR returns empty text (no_text_detected), preprocess_image IS called (D-03)."""
+        img = Image.new('RGB', (100, 100), color=(255, 255, 255))
+        preprocessed_img = Image.new('L', (100, 100), color=128)
+
+        # Direct OCR: 4 calls return empty. Preprocessed OCR: first call returns valid ID.
+        side_effects = ['', '', '', '',  # 4 direct rotations fail
+                        '67890']          # First preprocessed rotation succeeds
+        with patch('precede_ocr.pytesseract.image_to_string', side_effect=side_effects):
+            with patch('precede_ocr.preprocess_image', return_value=preprocessed_img) as mock_pp:
+                ids, angle, notes = extract_id_with_rotation(img)
+
+                mock_pp.assert_called_once_with(img)
+                assert ids == ['67890']
+                assert notes == 'preprocessed'
+
+    def test_preprocessing_triggered_on_noise_matches(self):
+        """When direct OCR returns only noise (trivial patterns), preprocess_image IS called (D-03)."""
+        img = Image.new('RGB', (100, 100), color=(255, 255, 255))
+        preprocessed_img = Image.new('L', (100, 100), color=128)
+
+        # Direct OCR: returns only trivial patterns. Preprocessed: valid ID.
+        side_effects = ['00000', '11111', '22222', '33333',  # 4 direct: noise only
+                        '54321']                               # First preprocessed succeeds
+        with patch('precede_ocr.pytesseract.image_to_string', side_effect=side_effects):
+            with patch('precede_ocr.preprocess_image', return_value=preprocessed_img) as mock_pp:
+                ids, angle, notes = extract_id_with_rotation(img)
+
+                mock_pp.assert_called_once()
+                assert ids == ['54321']
+                assert notes == 'preprocessed'
+
+    def test_preprocessing_triggered_on_no_match(self):
+        """When direct OCR returns text but no 5-digit match, preprocess_image IS called (D-03)."""
+        img = Image.new('RGB', (100, 100), color=(255, 255, 255))
+        preprocessed_img = Image.new('L', (100, 100), color=128)
+
+        # Direct OCR: text but no 5-digit numbers. Preprocessed: valid ID.
+        side_effects = ['abc', 'xyz', '123', '4567',  # 4 direct: no 5-digit match
+                        '98765']                        # First preprocessed succeeds
+        with patch('precede_ocr.pytesseract.image_to_string', side_effect=side_effects):
+            with patch('precede_ocr.preprocess_image', return_value=preprocessed_img) as mock_pp:
+                ids, angle, notes = extract_id_with_rotation(img)
+
+                mock_pp.assert_called_once()
+                assert ids == ['98765']
+                assert notes == 'preprocessed'
+
+    def test_preprocessed_notes_value(self):
+        """When preprocessing fallback succeeds, notes is exactly 'preprocessed' (D-04)."""
+        img = Image.new('RGB', (100, 100), color=(255, 255, 255))
+        preprocessed_img = Image.new('L', (100, 100), color=128)
+
+        side_effects = ['', '', '', '',  # 4 direct fail
+                        '45678']          # Preprocessed succeeds
+        with patch('precede_ocr.pytesseract.image_to_string', side_effect=side_effects):
+            with patch('precede_ocr.preprocess_image', return_value=preprocessed_img):
+                ids, angle, notes = extract_id_with_rotation(img)
+
+                assert notes == 'preprocessed'
+
+    def test_both_fail_returns_failure_reason(self):
+        """When both direct and preprocessed OCR fail, returns failure reason from all 8 texts."""
+        img = Image.new('RGB', (100, 100), color=(255, 255, 255))
+        preprocessed_img = Image.new('L', (100, 100), color=128)
+
+        # All 8 OCR calls return empty text
+        side_effects = ['', '', '', '', '', '', '', '']
+        with patch('precede_ocr.pytesseract.image_to_string', side_effect=side_effects):
+            with patch('precede_ocr.preprocess_image', return_value=preprocessed_img):
+                ids, angle, notes = extract_id_with_rotation(img)
+
+                assert ids == []
+                assert angle is None
+                assert notes == 'no_text_detected'
+
+    def test_preprocessed_pass_uses_same_rotation_order(self):
+        """Preprocessing pass tries rotations in same order: [90, 270, 0, 180] (D-02)."""
+        img = Image.new('RGB', (100, 100), color=(255, 255, 255))
+        preprocessed_img = Image.new('L', (100, 100), color=128)
+
+        # Direct: all 4 fail. Preprocessed: third rotation (0 deg) succeeds.
+        side_effects = ['', '', '', '',   # 4 direct fail
+                        '', '',            # Preprocessed 90, 270 fail
+                        '11223']           # Preprocessed 0 succeeds
+        with patch('precede_ocr.pytesseract.image_to_string', side_effect=side_effects):
+            with patch('precede_ocr.preprocess_image', return_value=preprocessed_img):
+                ids, angle, notes = extract_id_with_rotation(img)
+
+                assert ids == ['11223']
+                assert angle == 0  # Third in [90, 270, 0, 180]
+                assert notes == 'preprocessed'
+
+    def test_classify_failure_receives_all_8_texts(self):
+        """When both passes fail, classify_failure_reason receives 4 direct + 4 preprocessed texts."""
+        img = Image.new('RGB', (100, 100), color=(255, 255, 255))
+        preprocessed_img = Image.new('L', (100, 100), color=128)
+
+        side_effects = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
+        with patch('precede_ocr.pytesseract.image_to_string', side_effect=side_effects):
+            with patch('precede_ocr.preprocess_image', return_value=preprocessed_img):
+                with patch('precede_ocr.classify_failure_reason', return_value='no_match_any_rotation') as mock_classify:
+                    ids, angle, notes = extract_id_with_rotation(img)
+
+                    # Should pass all 8 OCR texts
+                    call_args = mock_classify.call_args[0][0]
+                    assert len(call_args) == 8
+                    assert call_args == ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']

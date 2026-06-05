@@ -239,6 +239,7 @@ def preprocess_image(pil_image: Image.Image) -> Image.Image:
 def extract_id_with_rotation(image: Image.Image, debug: bool = False) -> tuple[list[str], int | None, str]:
     """
     Extract 5-digit IDs by trying OCR at all 4 rotations with early exit.
+    Falls back to preprocessing (D-01/D-02/D-03) if direct OCR finds no match.
 
     Per Phase 2 decisions D-08, D-09: Try rotations [90, 270, 0, 180] sequentially.
     Exit loop on first rotation that yields valid 5-digit matches (saves compute).
@@ -246,8 +247,10 @@ def extract_id_with_rotation(image: Image.Image, debug: bool = False) -> tuple[l
 
     Per Phase 3 D-02: Returns ALL valid IDs from the successful rotation, not just first.
 
-    Uses PSM 6 (uniform text block) as middle ground for full-page scans with
-    isolated IDs. OEM 3 (LSTM engine). Digit whitelist restricts output.
+    Per Phase 5 D-01/D-02/D-03: When direct OCR fails, preprocess image with
+    grayscale + Gaussian blur + Otsu threshold, then retry ALL 4 rotations.
+    Per Phase 5 D-04: Notes column contains 'preprocessed' when fallback succeeds.
+    Per Phase 5 D-05: Same digit whitelist for both direct and preprocessed passes.
 
     Args:
         image: PIL Image at 300 DPI
@@ -255,10 +258,12 @@ def extract_id_with_rotation(image: Image.Image, debug: bool = False) -> tuple[l
 
     Returns:
         Tuple of (ids_list, rotation_angle, notes) where ids_list is a list of
-        valid ID strings, and notes is '' for success or failure reason for no match
+        valid ID strings, and notes is '' for direct success, 'preprocessed' for
+        preprocessing success, or failure reason for no match
     """
     ocr_texts = []  # Collect OCR text for failure classification
 
+    # === Direct OCR attempt (existing logic) ===
     for angle in [90, 270, 0, 180]:  # D-08: Rotation order optimized
         # Rotate image (expand=True prevents cropping)
         if angle == 0:
@@ -266,7 +271,7 @@ def extract_id_with_rotation(image: Image.Image, debug: bool = False) -> tuple[l
         else:
             rotated_image = image.rotate(angle, expand=True)
 
-        # Tesseract config: PSM 6, LSTM engine, digits only
+        # Tesseract config: PSM 6, LSTM engine, digits only (D-05: same for both passes)
         config = '--psm 6 --oem 3 -c tessedit_char_whitelist=0123456789'
 
         # Run OCR
@@ -291,8 +296,34 @@ def extract_id_with_rotation(image: Image.Image, debug: bool = False) -> tuple[l
             if selected_ids:
                 return selected_ids, angle, ''  # D-09: Early exit with empty notes
 
-    # D-12: No match found - classify failure reason
-    reason = classify_failure_reason(ocr_texts)
+    # === Preprocessing fallback (Phase 5 D-01/D-02/D-03) ===
+    # D-03: ALL failure types trigger preprocessing retry
+    preprocessed = preprocess_image(image)
+    ocr_texts_preprocessed = []
+
+    for angle in [90, 270, 0, 180]:  # D-02: retry ALL rotations on preprocessed
+        if angle == 0:
+            rotated_image = preprocessed
+        else:
+            rotated_image = preprocessed.rotate(angle, expand=True)
+
+        config = '--psm 6 --oem 3 -c tessedit_char_whitelist=0123456789'  # D-05: same whitelist
+        text = pytesseract.image_to_string(rotated_image, config=config).strip()
+        ocr_texts_preprocessed.append(text)
+
+        if debug:
+            print(f"DEBUG [Preprocessed Rotation {angle}]: {repr(text)}", file=sys.stderr)
+
+        normalized_text = normalize_digits(text)
+        matches = re.findall(r'\b\d{5}\b', normalized_text)
+
+        if matches:
+            selected_ids = select_all_valid_ids(matches)
+            if selected_ids:
+                return selected_ids, angle, 'preprocessed'  # D-04: flag in notes
+
+    # Both direct and preprocessed failed
+    reason = classify_failure_reason(ocr_texts + ocr_texts_preprocessed)
     return [], None, reason
 
 
