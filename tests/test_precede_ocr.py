@@ -1247,7 +1247,7 @@ class TestPreprocessImage:
         """Output pixels are only 0 or 255 (Otsu binarization)."""
         img = Image.new('RGB', (100, 100), color=(128, 128, 128))
         result = preprocess_image(img)
-        pixels = list(result.getdata())
+        pixels = list(result.get_flattened_data())
         unique_values = set(pixels)
         assert unique_values.issubset({0, 255})
 
