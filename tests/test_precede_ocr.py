@@ -573,15 +573,16 @@ class TestProcessAllPdfs:
         mock_result_a = [{'filename': 'a.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': ''}]
         mock_result_b = [{'filename': 'b.pdf', 'page': 1, 'ids': ['67890'], 'rotation_detected': 90, 'notes': ''}]
 
-        def mock_wrapper(path):
-            if 'a.pdf' in str(path):
-                return mock_result_a
-            return mock_result_b
-
         pdf_paths = [Path(temp_dir) / "a.pdf", Path(temp_dir) / "b.pdf"]
 
-        with patch('precede_ocr.process_single_pdf_wrapper', side_effect=mock_wrapper):
-            # Use workers=1 to avoid multiprocessing complexity in tests
+        # Mock the Pool to avoid actual multiprocessing (can't pickle mocks on Windows spawn)
+        with patch('precede_ocr.mp.Pool') as mock_pool_class:
+            mock_pool = MagicMock()
+            mock_pool.__enter__ = MagicMock(return_value=mock_pool)
+            mock_pool.__exit__ = MagicMock(return_value=False)
+            mock_pool.imap_unordered.return_value = iter([mock_result_a, mock_result_b])
+            mock_pool_class.return_value = mock_pool
+
             results = process_all_pdfs(pdf_paths, workers=1)
 
         assert len(results) == 2

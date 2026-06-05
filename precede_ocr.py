@@ -1,7 +1,8 @@
 """
-Precede OCR - Single-file PDF ID extraction pipeline.
+Precede OCR - Batch PDF ID extraction pipeline with parallel processing.
 
 Extracts 5-digit numeric Precede IDs from PDF pages using multi-rotation OCR.
+Supports single file or directory of PDFs with multiprocessing parallelism.
 Outputs structured CSV and JSON mapping each ID to its source filename and page number.
 """
 
@@ -11,9 +12,11 @@ import json
 import argparse
 import shutil
 import tempfile
+import multiprocessing as mp
 from pathlib import Path
 from collections import defaultdict
 from PIL import Image
+from tqdm import tqdm
 import pytesseract
 import pandas as pd
 from pdf2image import convert_from_path
@@ -420,30 +423,171 @@ def print_rotation_summary(results: list[dict]) -> None:
         print(f"  {label}: {count} pages ({percentage:.1f}%)")
 
 
+def discover_pdfs(input_path: str) -> list[Path]:
+    """
+    Recursively discover all PDF files in directory, or return single file.
+
+    Args:
+        input_path: Path to PDF file or directory
+
+    Returns:
+        List of Path objects for PDF files, sorted alphabetically
+
+    Raises:
+        FileNotFoundError: If path does not exist
+        ValueError: If single file is not a PDF
+    """
+    path = Path(input_path)
+    if path.is_file():
+        if path.suffix.lower() == '.pdf':
+            return [path]
+        else:
+            raise ValueError(f"Not a PDF file: {input_path}")
+    elif path.is_dir():
+        return sorted(path.glob('**/*.pdf'))
+    else:
+        raise FileNotFoundError(f"Path not found: {input_path}")
+
+
+def process_single_pdf_wrapper(pdf_path: Path) -> list[dict]:
+    """
+    Wrapper for multiprocessing: converts Path to str, handles errors.
+
+    Must be top-level function for Windows spawn pickling.
+
+    Args:
+        pdf_path: Path object for PDF file
+
+    Returns:
+        List of result dicts (one per page), or error dict if processing fails
+    """
+    try:
+        results = process_single_pdf(str(pdf_path), debug=False)
+        return results
+    except Exception as e:
+        return [{
+            'filename': pdf_path.name,
+            'page': 0,
+            'ids': [],
+            'rotation_detected': None,
+            'notes': f'error: {type(e).__name__}: {str(e)}'
+        }]
+
+
+def process_all_pdfs(pdf_paths: list[Path], workers: int) -> list[dict]:
+    """
+    Process all PDFs in parallel with progress bar and running stats.
+
+    Per D-06: workers default cpu_count()-1, overridable.
+    Per D-07: maxtasksperchild=50 for process recycling.
+    Per D-08: tqdm per-file progress bar with ETA.
+    Per D-09: Running stats in tqdm postfix (IDs found, no-ID pages, errors).
+
+    Args:
+        pdf_paths: List of PDF file paths
+        workers: Number of worker processes
+
+    Returns:
+        Flat list of all result dicts from all files
+    """
+    all_results = []
+    stats = {'ids': 0, 'no_id_pages': 0, 'errors': 0}
+
+    # Calculate chunksize for efficient IPC distribution
+    chunksize = max(1, len(pdf_paths) // (4 * workers))
+
+    # Create pool with process recycling (D-07: maxtasksperchild=50)
+    with mp.Pool(processes=workers, maxtasksperchild=50) as pool:
+        # Per D-08: tqdm per-file progress bar
+        pbar = tqdm(
+            total=len(pdf_paths),
+            desc="Processing PDFs",
+            unit="file"
+        )
+
+        for file_results in pool.imap_unordered(
+            process_single_pdf_wrapper,
+            pdf_paths,
+            chunksize=chunksize
+        ):
+            all_results.extend(file_results)
+
+            # Update running stats (D-09)
+            for r in file_results:
+                if r['page'] == 0 and 'error:' in r.get('notes', ''):
+                    stats['errors'] += 1
+                elif r['ids']:
+                    stats['ids'] += len(r['ids'])
+                else:
+                    stats['no_id_pages'] += 1
+
+            # Update progress bar
+            pbar.update(1)
+            pbar.set_postfix({
+                'IDs': stats['ids'],
+                'No-ID': stats['no_id_pages'],
+                'Errors': stats['errors']
+            })
+
+        pbar.close()
+
+    return all_results
+
+
+def main(input_path: str, output_csv: str, output_json: str | None = None,
+         workers: int | None = None, debug: bool = False) -> None:
+    """
+    Main entry point: discover PDFs, process (serial or parallel), write outputs.
+
+    Args:
+        input_path: Path to PDF file or directory of PDFs
+        output_csv: Path to output CSV file
+        output_json: Path to output JSON file (default: CSV path with .json extension)
+        workers: Number of parallel workers (None = cpu_count()-1 for dirs, 1 for single file)
+        debug: Enable debug OCR output to stderr (single file only)
+    """
+    # Discover PDF files
+    pdf_paths = discover_pdfs(input_path)
+
+    if not pdf_paths:
+        print(f"No PDF files found in {input_path}")
+        return
+
+    print(f"Found {len(pdf_paths)} PDF file(s)")
+
+    # Determine JSON output path (D-05: always generate both)
+    if output_json is None:
+        output_json = str(Path(output_csv).with_suffix('.json'))
+
+    # Single file: process directly (preserves debug mode)
+    if len(pdf_paths) == 1:
+        print(f"Processing {pdf_paths[0].name}...")
+        all_results = process_single_pdf(str(pdf_paths[0]), debug=debug)
+    else:
+        # Multiple files: parallel processing
+        if workers is None:
+            workers = max(1, mp.cpu_count() - 1)  # D-06: cpu_count()-1 default
+        print(f"Processing with {workers} workers...")
+        all_results = process_all_pdfs(pdf_paths, workers=workers)
+
+    # Write both outputs (D-05)
+    write_results_csv(all_results, output_csv)
+    write_results_json(all_results, output_json)
+    print_rotation_summary(all_results)
+    print("Done.")
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Extract Precede IDs from PDF files')
-    parser.add_argument('pdf_path', help='Path to input PDF file')
-    parser.add_argument('output_path', nargs='?', default='output/results.csv',
+    parser.add_argument('input_path', help='Path to PDF file or directory of PDFs')
+    parser.add_argument('--output-csv', default='output/results.csv',
                         help='Path to output CSV (default: output/results.csv)')
     parser.add_argument('--output-json', default=None,
                         help='Path to output JSON (default: same dir as CSV with .json extension)')
+    parser.add_argument('--workers', type=int, default=None,
+                        help='Number of parallel workers (default: cpu_count()-1)')
     parser.add_argument('--debug', action='store_true',
-                        help='Print raw OCR text for each rotation to stderr')
+                        help='Print raw OCR text for each rotation to stderr (single file only)')
     args = parser.parse_args()
 
-    if not Path(args.pdf_path).is_file():
-        print(f"Error: PDF file not found: {args.pdf_path}")
-        sys.exit(1)
-
-    print(f"Processing {args.pdf_path}...")
-    results = process_single_pdf(args.pdf_path, debug=args.debug)
-    write_results_csv(results, args.output_path)
-
-    # Per D-05: always generate both CSV and JSON
-    json_path = args.output_json
-    if json_path is None:
-        json_path = str(Path(args.output_path).with_suffix('.json'))
-    write_results_json(results, json_path)
-
-    print_rotation_summary(results)
-    print("Done.")
+    main(args.input_path, args.output_csv, args.output_json, args.workers, args.debug)
