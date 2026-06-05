@@ -1,11 +1,13 @@
 # Technology Stack
 
 **Project:** Precede OCR — PDF ID Scanner & Mapper
-**Researched:** 2026-06-04
+**Last Updated:** 2026-06-05
 **Target Platform:** Windows 10
 **Scale:** ~30,429 multi-page PDFs with rotation handling
 
-## Recommended Stack
+---
+
+## v1.0 Stack (Validated)
 
 ### Core OCR Engine
 | Technology | Version | Purpose | Why |
@@ -108,7 +110,170 @@ pdf_files = list(Path("target_dir").rglob("*.pdf"))
 
 **Rationale:** pathlib is Python 3's standard for path operations. Cleaner, safer than os.path string manipulation. Recursive glob: `.rglob("*.pdf")` for directory traversal. Cross-platform (Windows/Linux/Mac). 2025 best practice: "use pathlib for path manipulation, os for OS features."
 
-## Alternatives Considered
+### Supporting Libraries (v1.0)
+
+| Library | Version | Purpose | When to Use |
+|---------|---------|---------|-------------|
+| **numpy** | Latest stable | Array operations for OpenCV | OpenCV returns numpy arrays. Required dependency for opencv-python. Auto-installed with OpenCV. **Confidence: HIGH** |
+| **scipy** | Latest stable | Advanced image rotation (optional) | `scipy.ndimage.rotate()` for arbitrary-angle rotation. Optional: Pillow's `Image.rotate()` sufficient for 90° increments. Include if advanced rotation needed. **Confidence: MEDIUM** |
+
+---
+
+## v1.1 Campaign Management Additions
+
+**Purpose:** Interactive campaign menu, graceful Ctrl+C handling, statistics tracking, state persistence for resume capability.
+
+### Signal Handling & Graceful Shutdown
+
+| Technology | Version | Purpose | Why Recommended |
+|------------|---------|---------|-----------------|
+| **signal** (stdlib) | Python 3.14 | Handle SIGINT (Ctrl+C) on Windows | Windows supports SIGINT natively. Python stdlib signal module supports SIGINT, SIGTERM, SIGBREAK on Windows. Default action raises KeyboardInterrupt. **Confidence: HIGH** |
+| **multiprocessing.Event** (stdlib) | Python 3.14 | Cross-process shutdown flag | More reliable than signals for Windows multiprocessing. Event is a simple flag shared across processes. Worker processes check flag periodically, finish current work, then exit. Platform-independent (works on Windows 'spawn' mode). Recommended pattern: main process sets Event on SIGINT, workers check Event before starting new files. **Confidence: HIGH** |
+
+**Integration Pattern:**
+```python
+import signal
+import multiprocessing
+
+shutdown_event = multiprocessing.Event()
+
+def signal_handler(signum, frame):
+    print("\nShutdown requested. Finishing current files...")
+    shutdown_event.set()
+
+def worker_func(pdf_path):
+    if shutdown_event.is_set():
+        return None  # Skip if shutdown requested
+    # Process PDF...
+    return result
+
+if __name__ == '__main__':
+    signal.signal(signal.SIGINT, signal_handler)
+    with multiprocessing.Pool() as pool:
+        results = list(tqdm(pool.imap_unordered(worker_func, pdf_paths), total=len(pdf_paths)))
+```
+
+### Interactive CLI Menus
+
+| Technology | Version | Purpose | Why Recommended |
+|------------|---------|---------|-----------------|
+| **questionary** | 2.1.1 | Interactive CLI prompts and menus | Cross-platform (Windows compatible) via prompt_toolkit. Modern, actively maintained (released Aug 2025). Clean API: `questionary.select(message, choices).ask()`. Supports Python 3.9-3.14. Best choice for campaign menu (continue/re-run/stats/export options). **Confidence: HIGH** |
+
+**Installation:**
+```bash
+pip install questionary==2.1.1
+```
+
+**Fallback Option (if questionary has Windows issues):**
+| Technology | Version | Purpose | Why Recommended |
+|------------|---------|---------|-----------------|
+| **pick** | 2.6.0 | Simple terminal-based selection | Uses blessed backend for Windows compatibility (`pip install "pick[blessed]"`). Simpler API than questionary. Supports Python 3.8-3.14. Released Feb 2026. Fallback if questionary has issues. **Confidence: MEDIUM** |
+
+**Installation (fallback):**
+```bash
+pip install "pick[blessed]==2.6.0"
+```
+
+**Usage Pattern:**
+```python
+import questionary
+
+action = questionary.select(
+    "Campaign menu:",
+    choices=[
+        "Continue processing",
+        "Re-run failed files only",
+        "View statistics",
+        "Export partial results",
+        "Exit"
+    ]
+).ask()
+```
+
+### Statistics Tracking & Aggregation
+
+| Technology | Version | Purpose | Why Recommended |
+|------------|---------|---------|-----------------|
+| **collections.defaultdict** (stdlib) | Python 3.14 | Per-folder statistics aggregation | Auto-creates missing keys on first access. Perfect for nested stats: `folder_stats = defaultdict(lambda: {'total': 0, 'success': 0, 'failed': 0})`. Zero dependencies. Fast. Pairs with Counter for frequency analysis. **Confidence: HIGH** |
+| **collections.Counter** (stdlib) | Python 3.14 | Count frequencies (errors by type, IDs per folder) | Specialized for counting with `most_common(n)`, `update()`, `total()` (Python 3.10+). Better than defaultdict(int) for analysis tasks. Use for "top 10 error types" or "folders with most failures". **Confidence: HIGH** |
+| **dataclasses** (stdlib) | Python 3.14 | Type-safe campaign state structure | Clean state modeling: `@dataclass class CampaignState`. Built-in `asdict()` for JSON serialization. No dependencies. Pairs well with dataclasses-json for persistence. **Confidence: HIGH** |
+
+**Usage Pattern:**
+```python
+from collections import defaultdict, Counter
+from pathlib import Path
+
+# Per-folder statistics
+folder_stats = defaultdict(lambda: {'total': 0, 'success': 0, 'failed': 0, 'ids_found': 0})
+
+for pdf_path in pdf_paths:
+    folder = str(Path(pdf_path).parent)
+    folder_stats[folder]['total'] += 1
+    # Update based on result...
+
+# Error frequency analysis
+error_counts = Counter()
+for result in results:
+    if result.error:
+        error_counts[result.error_type] += 1
+
+print("Top 5 error types:")
+for error_type, count in error_counts.most_common(5):
+    print(f"  {error_type}: {count}")
+```
+
+### Campaign State Persistence
+
+| Technology | Version | Purpose | Why Recommended |
+|------------|---------|---------|-----------------|
+| **dataclasses-json** | 0.6.7 | Serialize/deserialize dataclasses to JSON | Simple decorator: `@dataclass_json @dataclass class CampaignState`. Automatic type handling (nested dataclasses, datetime, UUID). Actively maintained (June 2024 release). Supports Python 3.7-3.12 (no official 3.13+ yet, but works). Clean API: `.to_json()`, `.from_json()`. **Confidence: MEDIUM** (pre-1.0.0, but stable) |
+| **json** (stdlib) | Python 3.14 | JSON encoding/decoding | Fallback if dataclasses-json has issues. Use with dataclasses.asdict() for serialization. More manual but zero dependencies. **Confidence: HIGH** |
+| **tempfile + os.replace** | Python 3.14 (stdlib) | Atomic state file writes | **Already validated in v1.0 checkpoint system.** Pattern: `NamedTemporaryFile(dir=state_dir, delete=False)` → write → fsync → `os.replace(temp, final)`. Atomic on Windows (os.replace uses MoveFileEx). Crash-safe. **Confidence: HIGH** |
+
+**Installation:**
+```bash
+pip install dataclasses-json==0.6.7
+```
+
+**Usage Pattern:**
+```python
+from dataclasses import dataclass
+from dataclasses_json import dataclass_json
+import tempfile
+import os
+
+@dataclass_json
+@dataclass
+class CampaignState:
+    total_files: int
+    processed_files: int
+    failed_files: list
+    folder_stats: dict
+    last_updated: str
+
+def save_state(state: CampaignState, state_path: str):
+    state_dir = os.path.dirname(state_path)
+    with tempfile.NamedTemporaryFile(mode='w', dir=state_dir, delete=False, suffix='.json') as tmp:
+        tmp.write(state.to_json(indent=2))
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_path = tmp.name
+    os.replace(tmp_path, state_path)  # Atomic
+
+def load_state(state_path: str) -> CampaignState:
+    with open(state_path) as f:
+        return CampaignState.from_json(f.read())
+```
+
+### Progress Tracking Enhancement
+
+| Technology | Version | Purpose | Integration Notes |
+|------------|---------|---------|-------------------|
+| **tqdm** (already in v1.0) | 4.67.3 | Progress bars with graceful shutdown | For v1.1: use `pool.imap_unordered()` instead of `pool.map()` to enable tqdm wrapper: `tqdm(pool.imap_unordered(func, items), total=len(items))`. Updates as workers complete files. Works with Event-based shutdown (workers finish current file, progress bar shows completion). **Confidence: HIGH** |
+
+---
+
+## Alternatives Considered (v1.0)
 
 | Category | Recommended | Alternative | Why Not |
 |----------|-------------|-------------|---------|
@@ -123,22 +288,37 @@ pdf_files = list(Path("target_dir").rglob("*.pdf"))
 | **Progress Tracking** | tqdm | logging | logging lacks visual progress. tqdm provides ETA, percentage, rate — critical UX for long jobs. **Confidence: HIGH** |
 | **Output Formatting** | pandas | csv + json modules | csv + json modules work but require more boilerplate. pandas handles edge cases (NaN, encoding) cleanly. **Confidence: HIGH** |
 
-## Supporting Libraries
+## Alternatives Considered (v1.1 Campaign Management)
 
-| Library | Version | Purpose | When to Use |
-|---------|---------|---------|-------------|
-| **numpy** | Latest stable | Array operations for OpenCV | OpenCV returns numpy arrays. Required dependency for opencv-python. Auto-installed with OpenCV. **Confidence: HIGH** |
-| **scipy** | Latest stable | Advanced image rotation (optional) | `scipy.ndimage.rotate()` for arbitrary-angle rotation. Optional: Pillow's `Image.rotate()` sufficient for 90° increments. Include if advanced rotation needed. **Confidence: MEDIUM** |
+| Recommended | Alternative | When to Use Alternative |
+|-------------|-------------|-------------------------|
+| **questionary** | simple-term-menu | **NEVER on Windows** — simple-term-menu explicitly does not support Windows (Linux/macOS only). Use questionary or pick instead. |
+| **questionary** | pick | Use pick if questionary has Windows compatibility issues in practice. pick is simpler (less features) but more reliable on Windows with blessed backend. |
+| **questionary** | InquirerPy | Use InquirerPy if you need fuzzy search or more complex prompt features. questionary sufficient for simple select menus. |
+| **multiprocessing.Event** | signal-based shutdown | Use Event for cross-process coordination. Signals are OS-dependent (Windows has limited signal support). Event is platform-independent and pairs well with multiprocessing.Pool. |
+| **dataclasses-json** | json + dataclasses.asdict() | Use stdlib approach if dataclasses-json has Python 3.14 compatibility issues (library officially supports 3.7-3.12). More manual but zero dependencies. |
+| **tempfile + os.replace** | atomicwrites library | Use atomicwrites if you need more robust cross-platform guarantees or if manual approach has edge cases. stdlib approach already validated in v1.0, so prefer that. |
+| **defaultdict + Counter** | pandas for stats | **NO** — pandas already in stack for output formatting. Don't use pandas for in-memory statistics aggregation (overkill, slower). Use collections for lightweight aggregation. |
+| **JSON state persistence** | shelve | **NEVER** — shelve does not support concurrent read/write (only one writer at a time). Has corruption risks on macOS. Not suitable for campaign state with resume capability. Use JSON with atomic writes. |
+| **JSON state persistence** | SQLite | Use SQLite if state grows complex (e.g., per-file metadata, relational queries). For v1.1 campaign state (simple dict/list structures), JSON sufficient. SQLite overkill. |
 
-**Installation:**
-```bash
-# numpy auto-installed with opencv-python
-pip install scipy  # Optional, only if advanced rotation needed
-```
+## What NOT to Use
+
+| Avoid | Why | Use Instead |
+|-------|-----|-------------|
+| **simple-term-menu** | Does not support Windows (POSIX/Linux/macOS only). Explicitly states "Currently, Linux and macOS are supported." Project runs on Windows 10. | questionary or pick with blessed backend |
+| **shelve** | No concurrent read/write support. Silent corruption risk on macOS. Only one program can write at a time. Unsuitable for campaign state resume. | JSON with atomic writes (tempfile + os.replace) |
+| **pickle for state** | Binary format (not human-readable for debugging). Security risk if loading untrusted data. Harder to debug corrupted state. | JSON (text format, easy to inspect/debug) |
+| **os.rename** | Not atomic on Windows in all cases (cross-volume moves). | os.replace (atomic on all platforms since Python 3.3) |
+| **signal-only shutdown** | Windows has limited signal support (only SIGINT, SIGTERM, SIGBREAK, SIGABRT, SIGFPE, SIGILL, SIGSEGV). Signals don't propagate reliably to child processes on Windows 'spawn' mode. | multiprocessing.Event (cross-process flag) + signal handler in main process |
+| **PySimpleGUI** | No longer actively developed (deprecated in 2026). Not recommended for new projects. | questionary (CLI prompts) or PyQt/Tkinter (if GUI needed) |
+| **console-menu** | Less actively maintained than questionary. Fewer features. questionary is better supported. | questionary |
+
+---
 
 ## Installation Summary
 
-**Full stack installation:**
+**Full v1.0 + v1.1 stack installation:**
 ```bash
 # Core dependencies (Tesseract and Poppler already installed on Windows)
 pip install pytesseract==0.3.13
@@ -148,21 +328,30 @@ pip install opencv-python==4.13.0.92
 pip install pandas==3.0.3
 pip install tqdm==4.67.3
 
-# Optional advanced rotation
+# v1.1 Campaign Management additions
+pip install questionary==2.1.1
+pip install dataclasses-json==0.6.7
+
+# Optional (fallback if questionary has Windows issues)
+pip install "pick[blessed]==2.6.0"
+
+# Optional (advanced rotation, v1.0)
 pip install scipy
 ```
 
 **System requirements:**
 - **OS:** Windows 10 (project constraint)
-- **Python:** 3.8+ (pytesseract requirement)
+- **Python:** 3.8+ (pytesseract requirement), 3.14 recommended
 - **Tesseract OCR:** 5.5.2 (already installed)
 - **Poppler:** Latest stable (already installed)
 - **RAM:** 8GB+ recommended for parallel processing
 - **CPU:** Multi-core (4+ cores) for effective parallelization
 
+---
+
 ## Architecture Notes
 
-### Multi-Rotation OCR Strategy
+### Multi-Rotation OCR Strategy (v1.0)
 
 Tesseract does not reliably auto-detect rotation. Two approaches:
 
@@ -183,7 +372,7 @@ Tesseract does not reliably auto-detect rotation. Two approaches:
 - 4 OCR passes acceptable for 5-digit IDs (fast)
 - More robust than relying on Tesseract's OSD
 
-### Preprocessing Pipeline
+### Preprocessing Pipeline (v1.0)
 
 **Primary path (clean scans):**
 1. pdf2image: PDF → PIL Image (300 DPI)
@@ -198,7 +387,7 @@ Tesseract does not reliably auto-detect rotation. Two approaches:
 3. OpenCV: Morphological operations (dilation/erosion)
 4. Retry OCR with preprocessed image
 
-### Parallelization Strategy
+### Parallelization Strategy (v1.0)
 
 **Coarse-grained parallelization (per-PDF):**
 - Each worker process handles one PDF end-to-end
@@ -210,6 +399,23 @@ Tesseract does not reliably auto-detect rotation. Two approaches:
 - Overhead of IPC (inter-process communication) for each page
 - Process spawn cost on Windows higher than Linux
 - Coarse-grained sufficient for 30K PDFs
+
+### Graceful Shutdown Strategy (v1.1)
+
+**Pattern:**
+1. Main process catches SIGINT (Ctrl+C) via signal handler
+2. Signal handler sets multiprocessing.Event flag
+3. Workers check Event before starting each new file
+4. Workers finish current file if already started
+5. Workers skip new files if Event is set
+6. Main process waits for pool to drain (workers exit gracefully)
+
+**Why this approach:**
+- Event is cross-process (workers can check flag)
+- Workers finish current file (not killed mid-processing)
+- Clean shutdown without data corruption
+- tqdm shows progress until shutdown completes
+- Platform-independent (works on Windows 'spawn' mode)
 
 ### Windows-Specific Considerations
 
@@ -226,7 +432,27 @@ Tesseract does not reliably auto-detect rotation. Two approaches:
 **Tesseract path:**
 - If Tesseract not in PATH, set: `pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'`
 
+**Signal handling:**
+- Windows supports only: SIGINT, SIGTERM, SIGBREAK, SIGABRT, SIGFPE, SIGILL, SIGSEGV
+- SIGINT (Ctrl+C) raises KeyboardInterrupt by default
+- Signals don't propagate to child processes reliably on Windows 'spawn' mode
+- **Solution:** Catch SIGINT in main process, set multiprocessing.Event, workers check Event
+
+**Interactive menus:**
+- simple-term-menu does NOT work on Windows (Linux/macOS only)
+- questionary works via prompt_toolkit (cross-platform)
+- pick requires blessed backend for Windows: `pip install "pick[blessed]"`
+
+**Atomic file operations:**
+- os.replace is atomic on Windows (uses MoveFileEx)
+- tempfile must be in same directory as target (same filesystem)
+- fsync required before replace to ensure data on disk
+
+---
+
 ## Confidence Assessment
+
+### v1.0 Technologies
 
 | Technology | Confidence | Rationale |
 |------------|------------|-----------|
@@ -243,21 +469,47 @@ Tesseract does not reliably auto-detect rotation. Two approaches:
 | PyMuPDF alternative | MEDIUM | Multiple sources mention speed, not verified for this use case |
 | scipy for rotation | MEDIUM | Official docs, but optional for this project |
 
+### v1.1 Campaign Management Technologies
+
+| Technology | Confidence | Rationale |
+|------------|------------|-----------|
+| signal (stdlib) | HIGH | Official Python 3.14 docs, Windows SIGINT support verified |
+| multiprocessing.Event | HIGH | Stdlib, recommended pattern for Windows graceful shutdown (multiple sources) |
+| questionary | HIGH | Official PyPI, released Aug 2025, cross-platform via prompt_toolkit |
+| pick (fallback) | MEDIUM | Official PyPI, released Feb 2026, but fallback option only |
+| dataclasses-json | MEDIUM | Official PyPI (June 2024), but pre-1.0.0 and no official Python 3.13+ support yet |
+| defaultdict/Counter | HIGH | Python stdlib docs, 2026 best practices articles |
+| tempfile + os.replace | HIGH | Already validated in v1.0, official stdlib docs, atomic on Windows |
+| tqdm with imap | HIGH | Multiple 2026 articles, GitHub discussions, proven pattern |
+
+---
+
 ## Version Lock Rationale
 
-All versions are latest stable as of 2026-06-04:
+All versions are latest stable as of 2026-06-05:
 - **pytesseract 0.3.13:** Latest release (Aug 2024), stable
 - **pdf2image 1.17.0:** Latest release (Jan 2024), mature
 - **Pillow 12.2.0:** Latest release (April 2026), actively maintained
 - **opencv-python 4.13.0.92:** Latest release (Feb 2026), current
 - **pandas 3.0.3:** Latest release (May 2026), current
 - **tqdm 4.67.3:** Latest release (Feb 2026), current
+- **questionary 2.1.1:** Latest release (Aug 2025), actively maintained
+- **dataclasses-json 0.6.7:** Latest release (June 2024), pre-1.0.0 but stable
+- **pick 2.6.0:** Latest release (Feb 2026), fallback option
 
 Recommend pinning these versions in requirements.txt for reproducibility.
+
+---
 
 ## Sources
 
 ### Official Documentation
+- [signal — Python 3.14.5 Documentation](https://docs.python.org/3/library/signal.html)
+- [multiprocessing — Python 3.14 Documentation](https://docs.python.org/3/library/multiprocessing.html)
+- [collections — Python 3.14 Documentation](https://docs.python.org/3/library/collections.html)
+- [tempfile — Python 3.14 Documentation](https://docs.python.org/3/library/tempfile.html)
+- [shelve — Python 3.14 Documentation](https://docs.python.org/3/library/shelve.html)
+- [Data Persistence — Python 3.14.5 Documentation](https://docs.python.org/3/library/persistence.html)
 - [pytesseract · PyPI](https://pypi.org/project/pytesseract/)
 - [pdf2image · PyPI](https://pypi.org/project/pdf2image/)
 - [opencv-python · PyPI](https://pypi.org/project/opencv-python/)
@@ -265,9 +517,22 @@ Recommend pinning these versions in requirements.txt for reproducibility.
 - [pandas · PyPI](https://pypi.org/project/pandas/)
 - [tqdm · PyPI](https://pypi.org/project/tqdm/)
 - [Tesseract Release Notes](https://tesseract-ocr.github.io/tessdoc/ReleaseNotes.html)
-- [multiprocessing — Python Documentation](https://docs.python.org/3/library/multiprocessing.html)
+- [questionary 2.1.1 · PyPI](https://pypi.org/project/questionary/)
+- [pick 2.6.0 · PyPI](https://pypi.org/project/pick/)
+- [simple-term-menu 1.6.6 · PyPI](https://pypi.org/project/simple-term-menu/)
+- [InquirerPy 0.3.4 · PyPI](https://pypi.org/project/inquirerpy/)
+- [dataclasses-json 0.6.7 · PyPI](https://pypi.org/project/dataclasses-json/)
 
-### Technical Comparisons and Best Practices
+### Best Practices & Patterns
+- [Graceful exit with Python multiprocessing | The-Fonz blog](https://the-fonz.gitlab.io/posts/python-multiprocessing/)
+- [Python Multiprocessing graceful shutdown in the proper order | peterspython.com](https://www.peterspython.com/en/blog/python-multiprocessing-graceful-shutdown-in-the-proper-order)
+- [Handling SIGINT in multiprocessing on Windows - Python Discussions](https://discuss.python.org/t/handling-sigint-in-multiprocessing-on-windows/90064)
+- [Python Multiprocessing: How to Stop a Process – 2026 Best Practices](https://copyprogramming.com/howto/python-python-multiprocessing-stop-a-process-code-example)
+- [Mastering Python's Collections Counter in 2026](https://copyprogramming.com/howto/python-collections-counter-vs-defaultdict-int)
+- [Running tqdm with Python multiprocessing | Redowan's Reflections](https://rednafi.com/python/tqdm-with-multiprocessing/)
+- [Progress Bars for Python Multiprocessing Tasks - Lei Mao's Log Book](https://leimao.github.io/blog/Python-tqdm-Multiprocessing/)
+- [Crash-safe JSON at scale: atomic writes + recovery without a DB](https://dev.to/constanta/crash-safe-json-at-scale-atomic-writes-recovery-without-a-db-3aic)
+- [How to Implement Atomic File Writing in Python (No Partial Writes) | BSWEN](https://docs.bswen.com/blog/2026-04-04-atomic-file-writing-python/)
 - [Best Python OCR Library in 2026: 6 Libraries Tested](https://www.codesota.com/ocr/best-for-python)
 - [Tesseract vs EasyOCR vs OpenAI: Accuracy, Speed & Cost 2026](https://ttsforfree.com/en/blogs/image-to-text-python-tesseract-vs-easyocr/)
 - [Ultimate guide to Python Tesseract - Nutrient](https://www.nutrient.io/blog/tesseract-python-guide/)
@@ -276,13 +541,17 @@ Recommend pinning these versions in requirements.txt for reproducibility.
 - [Multiprocessing - PyMuPDF documentation](https://pymupdf.readthedocs.io/en/latest/recipes-multiprocessing.html)
 - [Tesseract Page Segmentation Modes (PSMs) Explained](https://pyimagesearch.com/2021/11/15/tesseract-page-segmentation-modes-psms-explained-how-to-improve-your-ocr-accuracy/)
 - [pathlib vs os.path Best Practices](https://medium.com/codeelevation/pathlib-vs-os-in-python-which-one-should-you-use-ed40a432673c)
-- [Progress Bars for Python Multiprocessing Tasks](https://leimao.github.io/blog/Python-tqdm-Multiprocessing/)
+- [questionary Python Guide [2026] | PyPI Tutorial](https://generalistprogrammer.com/tutorials/questionary-python-package-guide)
 
 ### Community Resources
 - [GitHub - tesseract-ocr/tesseract](https://github.com/tesseract-ocr/tesseract)
 - [GitHub - Belval/pdf2image](https://github.com/Belval/pdf2image)
 - [Poor Rotation / Layout detection Issue #4426](https://github.com/tesseract-ocr/tesseract/issues/4426)
+- [GitHub - wbenny/python-graceful-shutdown](https://github.com/wbenny/python-graceful-shutdown)
+- [GitHub - IngoMeyer441/simple-term-menu](https://github.com/IngoMeyer441/simple-term-menu)
+- [GitHub - lidatong/dataclasses-json](https://github.com/lidatong/dataclasses-json)
+- [How to update single progress bar in multiprocessing map() · tqdm Discussion #1121](https://github.com/tqdm/tqdm/discussions/1121)
 
 ---
 
-**Stack complete.** All versions verified against official sources as of 2026-06-04. Recommendations are prescriptive and actionable for roadmap creation.
+**Stack complete.** All v1.0 technologies validated in production. v1.1 additions researched and verified against official sources as of 2026-06-05. Recommendations are prescriptive and actionable for roadmap creation.

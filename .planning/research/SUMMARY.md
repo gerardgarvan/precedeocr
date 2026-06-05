@@ -1,346 +1,370 @@
 # Project Research Summary
 
-**Project:** Precede OCR — PDF ID Scanner & Mapper
-**Domain:** Batch PDF OCR with numeric ID extraction (30K+ PDFs, Windows)
-**Researched:** 2026-06-04
+**Project:** Precede OCR — PDF ID Scanner & Mapper (v1.1 Campaign Management)
+**Domain:** Campaign management layer for batch OCR pipeline
+**Researched:** 2026-06-05
 **Confidence:** HIGH
 
 ## Executive Summary
 
-This project requires building a high-volume batch OCR pipeline to extract 5-digit numeric IDs from ~30,429 multi-page, potentially rotated PDFs on Windows. Expert practitioners build such systems using a **producer-consumer architecture** with clear stage separation: file discovery, PDF-to-image conversion, OCR processing with multi-rotation handling, ID extraction via regex validation, and incremental result aggregation. The technology stack is mature and well-documented: Tesseract 5.x for OCR (already installed), pdf2image/Poppler for conversion, Python multiprocessing for parallelization, and pandas for structured output.
+This research synthesizes findings for adding campaign management features to the existing v1.0 batch OCR pipeline that processes ~30,429 multi-page PDFs on Windows 10. The v1.1 milestone adds production-grade UX for long-running campaigns: interactive menus for resume/re-run/stats, graceful Ctrl+C shutdown with checkpoint preservation, per-folder quality breakdowns, and statistics reporting. The recommended approach wraps the existing OCR pipeline without modifying its core logic, keeping risk low while adding critical operational features.
 
-The recommended approach is to **build incrementally**: start with a single-file serial pipeline to validate OCR accuracy and ID extraction logic, then add multi-rotation support (0/90/180/270 degrees) to handle rotated IDs, followed by multiprocessing parallelization to handle the 30K scale, then error handling with checkpointing, and finally conditional preprocessing as a fallback for low-quality scans. This order validates core logic before adding complexity and matches natural dependency chains discovered in architecture research.
+The key architectural insight is **separation of concerns**: campaign orchestration lives in a wrapper layer that manages state, presents menus, and handles signals, while the proven v1.0 OCR pipeline (Tesseract + multiprocessing + atomic checkpoints) remains unchanged. This minimizes integration risk and allows incremental delivery across 4 phases: (1) enhanced state schema, (2) graceful shutdown infrastructure, (3) interactive menu system, and (4) per-folder statistics.
 
-The key risks are Windows-specific: memory exhaustion from pdf2image loading all pages into RAM (must use `output_folder` + `paths_only=True`), Windows multiprocessing spawn overhead requiring careful worker initialization, and Tesseract's memory leak on Windows requiring process recycling every 100-500 files. These are **critical pitfalls** that cause silent failures and wasted processing time if not addressed from Phase 1. Additional risks include incorrect DPI (must be 300+), wrong PSM mode for isolated numbers (use PSM 7), and unreliable OSD rotation detection (brute-force all 4 rotations instead). Mitigation strategies are well-documented and proven effective.
+Critical risks center on Windows-specific multiprocessing and signal handling limitations. Signal handlers execute only in the main thread, making blocking calls dangerous; workers inherit SIGINT and may terminate prematurely without protection; and Pool cleanup order is strict (drain → close → join → terminate) to avoid deadlocks. Research validates stdlib-only mitigations: use `multiprocessing.Event()` for cross-process shutdown coordination, set `signal.SIG_IGN` in worker initializers, replace blocking `pool.map()` with non-blocking `pool.imap_unordered()`, and ensure tqdm closes before Pool cleanup. All patterns validated from official Python docs, bug tracker issues, and production experience reports (HIGH confidence).
 
 ## Key Findings
 
 ### Recommended Stack
 
-The stack leverages mature, CPU-focused tools optimized for Windows batch processing. Tesseract 5.5.2 with LSTM neural networks provides the best accuracy-to-speed ratio for clean scanned documents (sub-1-second per page), avoiding GPU dependencies entirely. The combination of Pillow for simple operations and OpenCV for fallback preprocessing balances simplicity with power — use Pillow first, only invoke OpenCV when initial OCR fails.
+The v1.1 stack adds minimal dependencies to the proven v1.0 baseline (Tesseract, pytesseract, pdf2image, Pillow, OpenCV, pandas, tqdm, multiprocessing stdlib). Campaign features require only stdlib modules plus two optional libraries for UX polish.
 
-**Core technologies:**
-- **Tesseract 5.5.2 + pytesseract 0.3.13**: Industry-standard OCR with proven numeric ID extraction; already installed; CPU-optimized for this use case
-- **pdf2image 1.17.0 + Poppler**: De facto standard for PDF-to-image conversion; critical `paths_only` parameter prevents memory exhaustion at scale
-- **Pillow 12.2.0**: Primary preprocessing (grayscale, rotation) with simple API; sufficient for 80%+ of high-quality scans
-- **OpenCV 4.13.0.92**: Fallback preprocessing only (adaptive thresholding, denoising) when Pillow+OCR fails; avoid over-processing
-- **multiprocessing.Pool / concurrent.futures**: Windows spawn-based parallelization; mandatory for 30K scale; ProcessPoolExecutor recommended for cleaner API
-- **tqdm 4.67.3**: Real-time progress tracking with ETA; essential UX for long-running batch; integrates with multiprocessing via `process_map()`
-- **pandas 3.0.3**: Clean CSV/JSON export with proper handling of missing values and encoding edge cases
+**Core technologies for campaign management:**
+- **signal (stdlib):** SIGINT handler for Ctrl+C on Windows. Only SIGINT and SIGBREAK available (not SIGTERM/SIGUSR1). Handlers execute in main thread only, requiring non-blocking patterns.
+- **multiprocessing.Event (stdlib):** Cross-platform shutdown coordination. More reliable than signals for Windows 'spawn' mode. Workers check Event before starting new files.
+- **questionary 2.1.1:** Interactive CLI menus via prompt_toolkit (cross-platform). Modern API: `questionary.select(message, choices).ask()`. Fallback: stdlib `input()` sufficient for simple number-select menus.
+- **dataclasses-json 0.6.7:** Serialize/deserialize campaign state to JSON. Auto-handles nested dataclasses. Alternative: stdlib `json` + `dataclasses.asdict()` if compatibility issues.
+- **tempfile + os.replace (stdlib):** Already validated in v1.0. Atomic state file writes prevent corruption on crash. Pattern: `NamedTemporaryFile()` → write → fsync → `os.replace()`.
+- **collections.defaultdict/Counter (stdlib):** Per-folder statistics aggregation. Lightweight, fast, zero dependencies. Avoid `multiprocessing.Manager()` (10-100x overhead).
 
-**Version confidence:** HIGH — all versions are latest stable as of 2026-06-04, verified against PyPI official pages and release notes.
+**Critical architectural decisions:**
+- **Campaign state separate from checkpoint:** `campaign_state.json` stores metadata (status, folder stats, interruption log); `.checkpoint.json` stores granular results. Both updated atomically.
+- **Stdlib-only menu:** Use `input()` for menus, not external libraries like simple-term-menu (Linux-only). Menu shown only when workers idle (input() blocks signals).
+- **Event-based shutdown, not signal-only:** Signals don't propagate reliably to child processes on Windows. Event is cross-platform IPC mechanism.
+- **Local stats aggregation, not Manager:** Workers return results to main process, main aggregates. Avoids IPC bottleneck for per-PDF stats.
+
+**Version confidence:** HIGH — signal/Event/tempfile/collections from Python 3.14 stdlib docs; questionary 2.1.1 and dataclasses-json 0.6.7 from official PyPI (latest 2025-2026 releases); atomic write pattern validated in existing v1.0 codebase.
 
 ### Expected Features
 
-Research identified 13 table stakes features that must all work together for MVP, plus 14 differentiators that can be added incrementally based on observed bottlenecks. Anti-features research confirms this is a CLI-only, local-processing, one-shot batch job — no GUI, no cloud services, no database backend.
+Research identifies clear table stakes (users expect in any long-running batch job) vs. differentiators (set this tool apart) for campaign management.
 
 **Must have (table stakes):**
-- **Recursive PDF discovery** — pathlib.rglob() for nested directories
-- **Multi-page PDF handling** — pdf2image page iteration at 300 DPI
-- **OCR text extraction** — pytesseract with proper PSM mode
-- **Rotation handling** — try all 4 rotations (0/90/180/270) with early exit on match
-- **Pattern validation** — regex `\d{5}` with boundaries to distinguish IDs from noise
-- **Page-level mapping** — track (filename, page_num, id, rotation) for lookup use case
-- **Missing ID detection** — flag pages with no matches (don't silently skip)
-- **Multiple IDs per page** — output all matches, not just first
-- **Structured output (CSV + JSON)** — CSV for Excel inspection, JSON for programmatic lookup
-- **Parallel processing** — mandatory at 30K+ scale (8 cores = 20 hours vs. 166 hours serial)
-- **Error handling** — isolate failures per file with structured logging and dead-letter queue
-- **Progress visibility** — tqdm progress bars with percentage and ETA
-- **Basic logging** — file-level success/failure for debugging and audit trail
+- **Continue from checkpoint** — Resume after Ctrl+C or crash without reprocessing completed files. Already have v1.0 checkpoint; enhance with campaign metadata.
+- **Graceful Ctrl+C handling** — Industry standard: stop accepting work → drain in-flight tasks → save state → exit cleanly. Requires signal handling + Event coordination.
+- **Completion progress tracking** — Real-time "X of Y files (Z%)" with files/min rate and ETA. tqdm provides this out-of-box; enhance to show success/failure counts.
+- **Success/failure counts** — Basic accountability: "Completed: 28,500 | Failures: 150 | Remaining: 1,779". Aggregate from checkpoint data.
+- **View partial results** — Export CSV/JSON from checkpoint mid-run for spot-checking quality without waiting for completion.
+- **Re-run failed files only** — Standard failure recovery: after fixing environment issues, retry only failed items. Filter checkpoint to create failure-only file list.
+- **Real-time processing rate** — Files/min or pages/sec to estimate completion time. tqdm provides iteration rate; enhance to track separately for multi-page PDFs.
+- **Error summary on exit** — Show "X files failed" with top failure reasons. List top 5 error types for debugging.
 
-**Should have (competitive):**
-- **Image preprocessing pipeline** — conditional fallback (grayscale → threshold → denoise) for degraded scans; improves accuracy from 85-92% to 95-98%
-- **OCR confidence scoring** — flag low-confidence results (<60) for manual review or retry with preprocessing
-- **Resume capability** — checkpoint file tracking processed PDFs; critical for long batches that may crash
-- **Character normalization** — post-OCR mapping (O→0, I/l→1, S→5) to fix common OCR confusions
-- **Batch statistics report** — final summary of success rate, failures, total IDs found, average processing time
-- **DPI optimization** — explicitly set 300 DPI (don't rely on defaults); consider 400 DPI for poor scans
-- **PSM mode optimization** — start with PSM 7 (single line), fall back to PSM 6 (uniform block) if "Precede" label present
+**Should have (differentiators):**
+- **Interactive campaign menu** — Better UX than CLI flags: Continue / Re-run failures / View stats / Export partial / Fresh start. Use stdlib `input()` for simplicity.
+- **Per-folder quality breakdown** — Unique insight: "Folder A: 99% success, Folder B: 85%" helps identify problem directories (e.g., older scans, different scanner quality).
+- **Preprocessing fallback statistics** — Show how often fallback triggered: "Primary OCR: 92% | Fallback preprocessing: 8%". Already have fallback logic, just add counter.
+- **Rotation heuristic reporting** — Track which rotations succeeded: "90°: 70% | 270°: 20%". Insight into document orientation patterns. Multi-rotation strategy already tracks successful angle.
 
 **Defer (v2+):**
-- **Region of interest (ROI) detection** — use "Precede" cursive text as anchor to narrow OCR region; complex but reduces false positives
-- **Duplicate ID detection** — post-processing check for same ID across multiple pages
-- **Adaptive preprocessing** — automatically detect low-quality scans and apply preprocessing only when needed (high complexity)
+- **OCR confidence scores** — Tesseract provides per-character confidence; aggregating to page-level adds processing overhead (MEDIUM complexity, useful but not critical).
+- **Smart ETA with historical data** — Regression models for per-folder rate prediction (HIGH complexity, linear ETA sufficient for v1.1).
+- **Anomaly detection flags** — Statistical outlier flagging: "Folder X has 10x more failures than average" (HIGH complexity, requires Z-score modeling).
+- **Batch comparison reports** — Compare multiple campaign runs for optimization experiments (requires campaign ID tracking, historical database — out of scope).
 
-**Complexity estimate:** 5-7 days for MVP table stakes, 8-12 days with key differentiators.
+**Anti-features (explicitly avoid):**
+- **Real-time dashboard web UI** — Out of scope per constraints (CLI-only). Stick to terminal UI; users can export results for analysis.
+- **Automatic failure retry logic** — Dangerous without root cause understanding. Provide manual "Re-run failures" option instead.
+- **Database-backed checkpoint** — JSON sufficient per constraints. No database dependencies.
+- **Parallel campaign execution** — Confusing UX. One active campaign at a time. Users can run multiple terminal sessions manually if needed.
+- **Interactive page-by-page review** — Not "no manual intervention" per constraints. Automated campaign only; manual review happens post-processing.
+- **Cloud storage integration** — Local-only tool per constraints. Users can manually upload outputs if desired.
+- **Adaptive parallelization** — Dynamic worker scaling adds complexity and unpredictability. Static worker count sufficient.
+
+**Complexity estimate:** Priority 1+2 (table stakes + key differentiators): 20-30 hours across 4 phases.
 
 ### Architecture Approach
 
-Batch PDF OCR pipelines follow a **producer-consumer pattern** with stage separation for independent optimization and failure isolation. On Windows, multiprocessing uses "spawn" (not "fork"), requiring all data to be pickled and sent to child processes — this mandates passing file paths instead of Image objects and using worker initialization for heavy configuration. Build order is critical: validate single-file serial flow first (proves OCR logic works), then add multi-rotation (core to accuracy for rotated IDs), then parallelization (handles scale), then error handling (resilience at scale), and finally conditional preprocessing as fallback (avoid over-processing).
+Campaign management adds three architectural layers atop the existing single-file OCR pipeline without modifying its core logic. The pattern: **campaign features wrap the pipeline, not interleave with it**. This preserves v1.0 stability while adding production UX.
 
 **Major components:**
-1. **File Discovery** — pathlib recursive scan producing list of PDF paths; fast, no parallelization needed
-2. **Page Extractor** — pdf2image converts PDFs to images at 300 DPI; use `output_folder` + `paths_only=True` to prevent memory exhaustion; parallelize at PDF level, not page level
-3. **OCR Processor** — pytesseract with multi-rotation (0/90/180/270) and early exit on valid ID match; slowest stage, CPU-bound, parallelizes well
-4. **Preprocessing Pipeline (conditional)** — Pillow grayscale + OpenCV threshold/denoise only when multi-rotation OCR finds no ID; fallback layer, not primary path
-5. **ID Extractor** — regex validation with boundaries and optional context check (near "Precede" keyword); fast in-process filter, no parallelization
-6. **Result Aggregator** — pandas incremental CSV writes (append mode) + final JSON output; serial writes prevent file corruption
-7. **Progress Tracker** — tqdm with `process_map()` for automatic multiprocessing-aware progress bars
-8. **Error Handler** — try-catch per PDF with structured logging, retry logic (exponential backoff, max 3 attempts), dead-letter queue for persistent failures
+1. **Campaign State Manager** — Loads/saves `campaign_state.json` with campaign ID, status (running/interrupted/completed), folder-level stats, interruption log, and options snapshot. Supplements `.checkpoint.json` (doesn't replace it). Atomic writes with fsync for crash safety.
+
+2. **Interactive Menu (stdlib only)** — Pre-run menu displays when checkpoint exists. Uses stdlib `input()` for action selection (Continue / Re-run failures / View stats / Export / Fresh). Menu only appears when workers idle (avoids input() blocking signals). No external dependencies.
+
+3. **Signal Handler + Event Coordination** — Main process registers `signal.signal(SIGINT, handler)` to catch Ctrl+C. Handler sets `multiprocessing.Event()` flag. Workers initialized with `signal.SIG_IGN` to prevent premature termination, check Event before each PDF, finish in-flight work on shutdown. Strict Pool cleanup: close → join → terminate fallback.
+
+4. **Folder Stats Aggregator** — Post-processes results to group by `Path.resolve()` normalized parent directory. Handles Windows case-insensitivity (`C:\PDFs` vs `C:\pdfs` → single key). Aggregates per-folder metrics: total files, IDs found, no-ID pages, errors. Uses `collections.defaultdict` for lightweight aggregation.
+
+5. **Non-blocking Pool Iteration** — Replaces blocking `pool.map()` with `pool.imap_unordered()` to allow periodic signal checking. Drains iterator before Pool cleanup to prevent queue deadlock. Uses context manager (`with Pool() as pool`) for automatic cleanup.
+
+**Data flow:**
+```
+CLI args → main_with_campaign()
+  ↓
+load_or_create_campaign_state() (campaign_state.json + .checkpoint.json)
+  ↓
+display_campaign_menu() if checkpoint exists
+  ↓
+setup_signal_handlers() (SIGINT → set Event)
+  ↓
+process_all_pdfs_with_shutdown() (existing pipeline with Event checks)
+  ├─ multiprocessing.Pool(initializer=init_worker with signal.SIG_IGN)
+  ├─ imap_unordered() with Event check in main loop
+  ├─ Periodic checkpoint writes (every 50 files, unchanged)
+  └─ On SIGINT: Event.set() → workers finish current file → pool.close() + join()
+  ↓
+aggregate_per_folder_stats(all_results)
+  ↓
+update_campaign_state(status='completed', stats=folder_stats)
+  ↓
+write_campaign_report() (Markdown summary)
+```
 
 **Key architectural patterns:**
-- **Multi-rotation strategy:** Brute-force all 4 rotations with regex validation instead of unreliable Tesseract OSD (OSD fails with sparse text like 5-digit IDs)
-- **Conditional preprocessing:** Apply expensive preprocessing (20-50ms per page) only when needed; saves 1.7-4.2 hours across 300K pages
-- **Process recycling:** Use `maxtasksperchild=100` to restart workers and release Tesseract's leaked memory on Windows
-- **Coarse-grained parallelization:** Parallelize at PDF level (each worker handles one PDF end-to-end), not page level (IPC overhead on Windows spawn)
+- **Campaign layer wraps pipeline:** OCR core (`process_single_pdf()`, `extract_id_with_rotation()`) unchanged. Campaign logic in orchestration layer.
+- **Separate state files:** Campaign metadata in `campaign_state.json`, granular results in `.checkpoint.json`. Both atomic writes, campaign state references checkpoint version.
+- **Result dict enhancement (additive only):** Add `folder_path` field to result dicts in `process_single_pdf_wrapper()`. Backward compatible (v1.0 code ignores new field).
+- **No changes to workers:** Workers still process one PDF end-to-end, return results. No campaign awareness except checking shutdown Event.
 
 ### Critical Pitfalls
 
-These are ranked by severity and research confidence (all HIGH confidence from official docs + verified issues).
+Research identified 10 critical pitfalls specific to Windows multiprocessing + signal handling + campaign management. All HIGH confidence from official Python docs, bug tracker, and production reports.
 
-1. **Memory exhaustion from pdf2image without output folders** — Default behavior loads all PDF pages into RAM; at 30K+ PDFs with 10-50MB per page, OS kills process mid-batch. **Prevention:** Always use `convert_from_path(pdf, output_folder='/tmp', paths_only=True)` to write to disk and return paths instead of Image objects. Clean up temp files after each PDF. Critical for Phase 1.
+1. **Signal handlers execute only in main thread (Windows spawn)** — Blocking calls like `pool.join()` or `pool.map()` prevent handler execution, making program unresponsive to Ctrl+C. **Prevention:** Use `pool.imap_unordered()` with timeout checks; replace blocking `join()` with timed polling; check shutdown Event in main loop with `break` on set.
 
-2. **Windows multiprocessing spawn overhead with large pickle objects** — Passing Image objects or config dicts to workers causes 10x slowdown; Windows pickles everything for each task. **Prevention:** Pass file paths (strings) only; use `Pool(initializer=worker_init)` to load heavy objects once per worker; set `OMP_THREAD_LIMIT=1` for pytesseract. Critical for Phase 4 parallelization.
+2. **Workers inherit SIGINT and terminate prematurely** — Default SIGINT handler raises KeyboardInterrupt in workers, corrupting in-flight work and leaving incomplete checkpoint writes. **Prevention:** Set `signal.SIG_IGN` in Pool `initializer=init_worker`, let only main process handle Ctrl+C via signal handler + Event.
 
-3. **Tesseract RAM not released on Windows** — Documented memory leak in Tesseract 4.x/5.x on Windows where RAM accumulates across OCR operations until crash. **Prevention:** Process in batches of 100-500 files with `maxtasksperchild=100` to automatically recycle workers and release memory. Monitor process memory and force restart when threshold exceeded. Critical for Phase 3 and 4.
+3. **Pool cleanup order causes deadlock or corruption** — Calling `terminate()` before draining iterators corrupts queues; calling `join()` without `close()` hangs indefinitely. **Prevention:** Strict sequence: drain `imap_unordered()` iterator → `pool.close()` → `pool.join(timeout=30)` → check workers finished → `pool.terminate()` only if timeout.
 
-4. **Insufficient image resolution for 5-digit IDs** — Default DPI (72-150) makes digits too small (<10 pixels x-height); Tesseract noise-filters them out or misrecognizes. **Prevention:** Explicitly set `dpi=300` in pdf2image (minimum for reliable digit recognition); verify converted image dimensions; consider DPI=400 for poor-quality scans. Critical for Phase 1.
+4. **Checkpoint corruption from concurrent writes or missing fsync** — `os.replace()` alone doesn't guarantee data on disk; crash during write leaves partial JSON. Multiple processes writing concurrently create race conditions. **Prevention:** Call `flush()` + `os.fsync()` before `os.replace()`; centralize checkpoint writes in main process only (workers return results, don't write).
 
-5. **Wrong PSM mode for isolated 5-digit IDs** — Default PSM 3 (full page segmentation) returns "Empty page!!" on images with isolated numbers; Tesseract expects paragraphs, not sparse single-line data. **Prevention:** Use PSM 7 (single line) for isolated IDs: `config='--psm 7 --oem 3'`; fall back to PSM 6 if "Precede" label present. Test multiple PSM modes if initial attempt fails. Critical for Phase 3.
+5. **imap/imap_unordered deadlock on generator exceptions (Python <3.5)** — Fixed in 3.5+, but generator exceptions crash task handler thread causing indefinite hang. **Prevention:** Use Python 3.5+; wrap generators in exception handlers; or use pre-computed lists instead of generators.
 
-6. **Unreliable Tesseract OSD for rotation detection** — OSD (PSM 0) fails with sparse text, reports wrong orientations, or crashes with "Too few characters." **Prevention:** Skip OSD entirely; brute-force all 4 rotations (0/90/180/270) with regex validation to determine correct orientation; rotation is fast (just data rearrangement); use confidence scores from `image_to_data()` to pick best result. Critical for Phase 2.
+6. **Shared Manager objects create performance bottleneck** — `multiprocessing.Manager()` proxies use IPC for every read/write, reducing performance 10-100x. **Prevention:** Use local counters in workers, aggregate in main process; never use Manager for high-frequency updates (per-PDF stats).
 
-7. **Digit confusion without character normalization** — OCR misreads O→0, I/l→1, S→5, B→8 even with whitelist config (LSTM engine sometimes ignores `tessedit_char_whitelist`). **Prevention:** Post-OCR normalization mapping + regex validation; log original output before normalization; use OEM 3 (combined legacy + LSTM) for better whitelist support. Critical for Phase 3.
+7. **tqdm progress bars leak or corrupt on Pool termination** — Abrupt termination (via `terminate()` or Ctrl+C) leaves terminal formatting corrupted (missing newlines, ANSI codes visible). **Prevention:** Always call `tqdm.close()` in finally block before Pool cleanup; use context manager `with tqdm() as pbar`.
 
-8. **File handle leaks leading to resource exhaustion** — Opening files without explicit closure causes handles to accumulate; Windows hits per-process limit, preventing new files from opening. **Prevention:** Always use context managers (`with Image.open() as img:`); call `gc.collect()` periodically (every 100 files); monitor open handles. Critical for Phase 1 and must audit all workers in Phase 4.
+8. **Windows signal limitations break cross-platform code** — Only SIGINT/SIGTERM/SIGBREAK available on Windows; SIGUSR1/SIGHUP crash with ValueError. **Prevention:** Use only SIGINT for cross-platform code; use `multiprocessing.Event()` for worker coordination (not signals).
+
+9. **Interactive menu blocks signal handling during input()** — `input()` syscall doesn't return until Enter pressed; can't Ctrl+C during menu. **Prevention:** Show menu only when workers idle (not while Pool active); use non-blocking alternatives if workers must run during menu.
+
+10. **Per-folder statistics require path normalization** — Windows paths case-insensitive but case-preserving; string keys create duplicates ("C:\\PDFs" vs "C:\\pdfs"). **Prevention:** Use `Path.resolve()` for absolute normalized paths; store as strings for dict keys; handle case-insensitive lookups on Windows.
 
 ## Implications for Roadmap
 
-Based on combined research, the natural build order follows **feature dependencies and risk mitigation priorities**. Architecture research shows single-file serial flow must be validated first (proves OCR logic), then rotation handling (core to accuracy), then parallelization (enables scale), then error handling (resilience), and finally preprocessing (quality fallback). Pitfalls research confirms Phase 1 must address memory, file handles, and DPI immediately to prevent silent failures.
+Based on research, campaign management should be built in 4 incremental phases that layer onto the existing v1.0 pipeline without modifying core OCR logic. Order dictated by dependency chain: state schema → shutdown infrastructure → menu UX → statistics. Each phase independently testable.
 
-### Phase 1: Foundation — Single-File OCR Pipeline
-**Rationale:** Validate entire pipeline end-to-end with one PDF before scaling. Catch integration issues early (Tesseract not found, Poppler missing). Prove OCR → ID extraction logic works without multiprocessing debugging overhead. Architecture research confirms this is mandatory foundation.
+### Phase 1: Enhanced Campaign State Schema
+**Rationale:** Foundation for all campaign features. Must establish state structure, atomic write patterns, and path normalization before adding menu or stats. Low risk since v1.0 checkpoint system already validates atomic writes.
 
-**Delivers:** Working single-file processor that outputs correct IDs with page numbers to CSV.
+**Delivers:**
+- `campaign_state.json` schema (campaign ID, status, progress, folder stats, interruption log)
+- `load_or_create_campaign_state()` / `update_campaign_state()` functions with atomic writes
+- `folder_path` field added to result dicts in `process_single_pdf_wrapper()` (additive, backward compatible)
+- Path normalization with `Path.resolve()` to avoid Windows case-sensitivity duplicates
 
-**Addresses (table stakes):**
-- Recursive PDF discovery (single file for testing)
-- Multi-page PDF handling (pdf2image wrapper)
-- OCR text extraction (pytesseract wrapper)
-- Pattern validation (regex for 5-digit IDs)
-- Page-level mapping (filename, page, id tracking)
-- Structured output (CSV writer)
+**Addresses (table stakes):** Continue from checkpoint, per-folder statistics (differentiator)
 
-**Avoids (critical pitfalls):**
-- Memory exhaustion: Use `output_folder` + `paths_only=True` from start
-- Insufficient resolution: Explicitly set `dpi=300`
-- File handle leaks: Establish context manager patterns
-- Wrong PSM mode: Start with PSM 7 research recommendation
+**Avoids (critical pitfalls):** Pitfall #10 (path normalization), Pitfall #4 (checkpoint corruption via atomic writes)
 
-**Research flags:** Standard patterns, skip research-phase. Well-documented in pytesseract + pdf2image official docs.
+**Uses (from stack):** tempfile + os.replace (already validated in v1.0), pathlib.Path, json stdlib, dataclasses + dataclasses-json
+
+**Research flag:** No deeper research needed — extends existing checkpoint system with well-documented stdlib patterns. Standard file I/O.
 
 ---
 
-### Phase 2: Rotation Handling — Multi-Angle OCR
-**Rationale:** IDs are rotated ~90 degrees per project requirements. Architecture research shows multi-rotation is core to accuracy and must be implemented before parallelization to debug rotation logic serially. Features research confirms rotation handling is table stakes. Build before scaling to avoid debugging rotations across multiple workers.
+### Phase 2: Graceful Shutdown Infrastructure
+**Rationale:** Critical safety feature before adding interactive elements. Must establish signal handling, Event coordination, and Pool cleanup patterns to prevent data loss on Ctrl+C. Highest technical risk due to Windows multiprocessing quirks; research thoroughly validated mitigations.
 
-**Delivers:** Single-file processor that correctly extracts IDs from pages at any rotation (0/90/180/270 degrees).
+**Delivers:**
+- `signal.signal(SIGINT, handler)` registration in main process
+- `multiprocessing.Event()` creation + passing via Pool initializer
+- Worker initializer with `signal.SIG_IGN` to prevent premature termination
+- Modified `process_all_pdfs()` → `process_all_pdfs_with_shutdown()` with Event checks in main loop
+- Non-blocking `pool.imap_unordered()` replacing `pool.map()` to allow signal processing
+- Strict cleanup sequence in finally block: drain iterator → close → join(timeout=30) → terminate fallback
+- Campaign state marked `interrupted` on SIGINT with timestamp in interruption log
+- tqdm.close() in finally block before Pool cleanup (prevent terminal corruption)
 
-**Implements:**
-- Multi-rotation strategy (try all 4 angles with early exit)
-- Rotation tracking in output (add `rotation_detected` column)
-- Validation with regex after each rotation
-- Confidence scoring to pick best result
+**Addresses (table stakes):** Graceful Ctrl+C handling, campaign resume after interrupt
 
-**Avoids (critical pitfall):**
-- Unreliable OSD: Skip Tesseract's PSM 0 rotation detection entirely; use brute-force multi-rotation with regex validation instead
+**Avoids (critical pitfalls):** Pitfall #1 (main thread blocking), #2 (worker SIGINT), #3 (cleanup deadlock), #7 (tqdm leaks), #8 (Windows signals)
 
-**Uses (from stack):**
-- Pillow `Image.rotate()` for 90-degree increments (fast, lossless)
-- pytesseract `image_to_data()` for confidence scores
+**Uses (from stack):** signal stdlib, multiprocessing.Event, Pool initializer, tqdm (existing)
 
-**Research flags:** Standard pattern (rotation handling well-documented). Skip research-phase.
-
----
-
-### Phase 3: Scale — Parallel Processing
-**Rationale:** 30K+ PDFs = 166 hours serial vs. 20 hours parallel (8 cores). Parallelization is non-negotiable at this scale per features research. Core logic validated in Phase 1-2, so parallelization is pure optimization without introducing logic bugs. Architecture research specifies Windows spawn constraints that must be designed around from start.
-
-**Delivers:** Multi-worker processor handling 100+ PDFs in parallel without crashes; linear speedup with CPU count.
-
-**Implements:**
-- ProcessPoolExecutor with `max_workers=cpu_count()`
-- Worker initialization pattern for heavy config (avoid pickle overhead)
-- Coarse-grained parallelization (per-PDF, not per-page)
-- tqdm progress tracking with `process_map()`
-- Incremental CSV output (append mode, prevent memory exhaustion)
-
-**Avoids (critical pitfalls):**
-- Windows spawn overhead: Pass file paths only, use worker initialization
-- Tesseract memory leak: Set `maxtasksperchild=100` for process recycling
-- File handle leaks: Audit all workers for proper context managers
-
-**Uses (from stack):**
-- concurrent.futures.ProcessPoolExecutor (cleaner API than multiprocessing.Pool)
-- tqdm.contrib.concurrent.process_map for automatic progress bars
-
-**Research flags:** Needs careful testing on Windows. Standard patterns documented but Windows spawn behavior requires validation. Consider quick spike for worker initialization pattern before full phase.
+**Research flag:** **Requires extensive manual testing on Windows** — automated tests can't fully validate Ctrl+C timing edge cases, second Ctrl+C force-quit, or zombie process cleanup. Budget 30-50% extra QA time. Test scenarios: Ctrl+C early/mid/late in batch, second Ctrl+C force-quit, verify Task Manager shows no zombie processes, checkpoint saved correctly on interrupt.
 
 ---
 
-### Phase 4: Resilience — Error Handling & Checkpointing
-**Rationale:** At 30K scale, some PDFs will be corrupted, some OCR will fail, and long-running batches may crash mid-run. Architecture research shows error handling is meaningful only after parallelization (race conditions, worker crashes). Features research confirms resume capability is key differentiator for long batches. Real-world failure modes emerge at scale.
+### Phase 3: Interactive Campaign Menu
+**Rationale:** UX layer that surfaces campaign state to user. Depends on Phase 1 (state schema) for resume/stats display. Must follow Phase 2 (shutdown) to ensure menu doesn't block signal handling. Stdlib-only implementation (no external dependencies) reduces risk.
 
-**Delivers:** Batch processor that completes 30K run even with 5% corrupted files; all failures logged; resume capability for crashes.
+**Delivers:**
+- `display_campaign_menu()` with stdlib `input()` — options: [1] Continue, [2] Re-run failures, [3] View stats, [4] Export partial, [5] Fresh start, [Q] Quit
+- `display_folder_stats()` — table view of per-folder breakdown (uses campaign state from Phase 1)
+- Menu action handlers:
+  - Continue: calls existing `process_all_pdfs_with_shutdown()` with remaining PDFs
+  - Re-run failures: filters to failed files from campaign state, creates new file list
+  - View stats: displays folder table, returns to menu
+  - Export partial: calls existing CSV/JSON writers with checkpoint data
+  - Fresh start: deletes both `.checkpoint.json` and `campaign_state.json`, creates new campaign
+- Menu flow: Load campaign state → Show menu (if checkpoint exists) → Dispatch action → Execute pipeline or loop to menu
+- Menu only shown when workers idle (input() doesn't block active Pool)
 
-**Implements:**
-- Try-catch per PDF with structured logging
-- Retry logic (exponential backoff, max 3 attempts)
-- Dead-letter queue for persistent failures
-- Checkpoint file tracking processed PDFs
-- Resume from last successful file
-- Batch statistics report (success rate, failures, total IDs, avg time)
+**Addresses (table stakes):** Re-run failed files, view partial results; Interactive campaign menu (differentiator)
 
-**Avoids (pitfall):**
-- Catastrophic failure: Isolate poison pills so they don't block pipeline
-- Lost progress: Write results incrementally + checkpoint every 100 files
+**Avoids (critical pitfalls):** Pitfall #9 (input() blocking signals — menu only when workers idle), Pitfall #5 (generator exceptions — pre-compute file lists before menu)
 
-**Uses (from stack):**
-- Python logging with file + console handlers
-- pathlib for checkpoint file operations
+**Uses (from stack):** stdlib input() (primary), optional questionary 2.1.1 for better UX, pathlib for file operations
 
-**Research flags:** Standard batch processing patterns. Skip research-phase.
+**Research flag:** No deeper research needed — simple menu pattern with stdlib. Manual testing required for UX validation (menu displays correctly, actions dispatch as expected, loop back to menu works).
 
 ---
 
-### Phase 5: Quality — Conditional Preprocessing & Validation
-**Rationale:** Architecture research emphasizes preprocessing is a **fallback**, not primary path. Preprocessing adds 20-50ms per page (1.7-4.2 hours across 300K pages); only apply when needed. Features research confirms preprocessing improves accuracy from 85-92% to 95-98% but should be conditional. Add last because it's optional optimization, not core functionality.
+### Phase 4: Per-Folder Statistics & Reporting
+**Rationale:** Quality insights layer. Depends on Phase 1 (`folder_path` in results). Can be built in parallel with Phase 3 (menu) but reporting comes after pipeline completes. Lowest risk — pure post-processing of existing results.
 
-**Delivers:** Preprocessing pipeline that improves extraction rate on low-quality scans without degrading high-quality results.
+**Delivers:**
+- `aggregate_per_folder_stats()` — groups results by `folder_path`, calculates per-folder metrics:
+  - total_files, processed, ids_found, no_id_pages, errors
+  - preprocessing fallback trigger count (if fallback exists)
+  - rotation distribution (90°/270°/0°/180°)
+- Enhanced `campaign_state.json` with `folder_stats` dict populated after pipeline completes
+- `write_campaign_report()` — Markdown report (`campaign_report.md`) with:
+  - Campaign summary (ID, duration, total files, total IDs extracted)
+  - Per-folder breakdown table
+  - Problem area highlights (folders with high error rate)
+  - Recommendations (e.g., "Re-run folder2 with --debug flag")
+- Menu option [3] displays folder stats table from existing campaign state (doesn't re-run pipeline)
 
-**Implements:**
-- Conditional preprocessing (only if multi-rotation OCR finds no ID)
-- Tiered fallback: raw → Pillow grayscale → OpenCV threshold/denoise
-- Character normalization (O→0, I→1, S→5 post-OCR)
-- Confidence scoring with manual review threshold
-- Sample validation (random 50 pages manual verification)
+**Addresses (differentiators):** Per-folder quality breakdown, preprocessing fallback statistics, rotation heuristic reporting
 
-**Avoids (pitfall):**
-- Over-aggressive preprocessing: Don't preprocess all images; use tiered fallback approach
-- Ignoring confidence scores: Flag low-confidence results (<60) for manual review
+**Avoids (critical pitfalls):** Pitfall #6 (Manager overhead — uses local aggregation in main process post-pipeline), Pitfall #10 (path normalization — established in Phase 1)
 
-**Uses (from stack):**
-- Pillow for primary preprocessing (grayscale conversion)
-- OpenCV for advanced fallback (adaptive thresholding, denoising)
+**Uses (from stack):** collections.defaultdict (lightweight aggregation), pathlib, Markdown string formatting
 
-**Research flags:** Preprocessing techniques well-documented. Skip research-phase. Consider A/B testing on sample corpus to validate effectiveness before full integration.
+**Research flag:** No deeper research needed — straightforward aggregation with stdlib `collections.defaultdict`. Standard post-processing pattern.
 
 ---
 
 ### Phase Ordering Rationale
 
 **Why this order:**
-1. **Phase 1 before 2-5:** Must validate core OCR logic works before adding complexity; integration issues (missing Tesseract, wrong paths) surface immediately in simple single-file test
-2. **Phase 2 before 3:** Rotation logic easier to debug serially; adding parallelization to broken rotation logic creates race conditions that obscure root cause
-3. **Phase 3 before 4:** Error handling requires understanding failure modes at scale; serial processing hides race conditions and worker crashes
-4. **Phase 5 last:** Preprocessing is optional fallback; can be added incrementally without affecting existing pipeline; expensive (time cost) so validate it's needed first
+1. **Phase 1 before Phase 2:** Campaign state must exist before shutdown can mark it `interrupted`. Folder path tracking must be in place before workers start (can't retrofit after results collected).
+
+2. **Phase 2 before Phase 3:** Graceful shutdown must work before menu appears, otherwise selecting "Continue" after Ctrl+C could encounter corrupt state or deadlocked Pool. Signal handling infrastructure is foundation for all interactive features.
+
+3. **Phase 3 independent of Phase 4:** Menu and stats are orthogonal features; can be built in parallel. Menu doesn't require stats to function (shows "no stats available" if Phase 4 incomplete). Can defer Phase 4 if time-constrained without breaking menu.
+
+4. **Phase 4 last:** Pure post-processing; no dependencies on it. Can be deferred if time-constrained without breaking core campaign functionality (continue/re-run/export still work).
 
 **Dependency chain discovered in research:**
-- Multi-rotation depends on validated single-rotation OCR (Phase 2 needs Phase 1)
-- Parallelization depends on proven serial pipeline (Phase 3 needs Phase 1-2)
-- Error handling depends on parallelization failure modes (Phase 4 needs Phase 3)
-- Preprocessing depends on measuring baseline accuracy (Phase 5 needs Phase 1-3 to identify which pages fail)
+- Enhanced state schema (Phase 1) required by menu display (Phase 3) and stats reporting (Phase 4)
+- Graceful shutdown (Phase 2) required before interactive menu (Phase 3) to prevent input() blocking Ctrl+C
+- Folder path tracking (Phase 1) required by per-folder stats (Phase 4)
+- No dependencies on Phase 4 (post-processing only)
+
+**Architecture preserves v1.0 isolation:**
+- All phases wrap existing `process_all_pdfs()` / `process_single_pdf()` without modifying OCR logic
+- Worker functions unchanged except adding `folder_path` field to return dict (additive, backward compatible)
+- Checkpoint writes remain atomic (tempfile + fsync + os.replace pattern validated in v1.0)
+- Pool parallelization logic unchanged (coarse-grained per-PDF workers)
 
 **Pitfall avoidance:**
-- Phase 1 addresses 4 critical pitfalls immediately (memory, DPI, handles, PSM) before they compound in later phases
-- Phase 2 implements multi-rotation brute force early to avoid OSD pitfall
-- Phase 3 designed around Windows spawn constraints from start (not retrofitted)
-- Phase 4 prevents data loss from crashes via checkpointing
-- Phase 5 conditional approach prevents over-preprocessing pitfall
+- Phase 1 establishes atomic writes and path normalization before complexity added
+- Phase 2 implements all shutdown safety patterns before interactive features (most dangerous phase — needs manual testing)
+- Phase 3 builds menu only when shutdown patterns proven safe
+- Phase 4 uses local aggregation patterns (not Manager) established from research
 
 ### Research Flags
 
+**Phases likely needing deeper research during planning:**
+- **Phase 2 (Graceful Shutdown):** Windows multiprocessing has documented edge cases around SIGINT propagation, Pool zombie processes, and context manager cleanup. Research validates mitigations but **manual testing on Windows mandatory** — automated tests can't cover all Ctrl+C timing scenarios or force-quit (second Ctrl+C) behavior. Budget 30-50% more testing time than typical feature. Test checklist: Ctrl+C at various points (early/mid/late), second Ctrl+C force-quit, Task Manager zombie verification, checkpoint integrity after interrupt.
+
 **Phases with standard patterns (skip research-phase):**
-- **Phase 1 (Foundation):** pytesseract + pdf2image integration well-documented in official docs; straightforward file I/O patterns
-- **Phase 2 (Rotation):** Image rotation + multi-attempt OCR standard pattern; Pillow rotation docs + PyImageSearch tutorials cover this
-- **Phase 4 (Resilience):** Checkpointing and error handling general batch processing patterns; Python logging stdlib well-documented
-- **Phase 5 (Quality):** Preprocessing techniques documented in official Tesseract "Improving Quality" guide + multiple tutorials
+- **Phase 1 (Campaign State):** Direct extension of existing v1.0 checkpoint system. Atomic write pattern already validated. Path normalization well-documented in pathlib docs. JSON schema design straightforward.
+- **Phase 3 (Interactive Menu):** Stdlib `input()` pattern trivial. No complex integrations. UX testing required but no technical unknowns. Menu logic is simple dispatch.
+- **Phase 4 (Folder Statistics):** Standard aggregation with `defaultdict`. No novel algorithms or libraries. Post-processing patterns well-documented.
 
-**Phases needing careful validation (not research, but testing):**
-- **Phase 3 (Parallelization):** Windows spawn behavior requires testing on target hardware; worker initialization pattern documented but performance characteristics vary; recommend quick spike (4-8 hours) to validate ProcessPoolExecutor + worker init + tqdm integration before committing to full phase
-- **Phase 5 (Preprocessing):** A/B test on sample corpus (100 PDFs) to measure actual accuracy improvement before full integration; validate Pillow vs. OpenCV trade-offs on real data
-
-**No phases need /gsd:research-phase** — all patterns sufficiently documented in this research. Validation needed, not additional research.
+**No phases need `/gsd:research-phase`** — all patterns sufficiently documented in this research synthesis and source files (STACK.md, FEATURES.md, ARCHITECTURE.md, PITFALLS.md). Phase 2 needs validation/testing, not additional research.
 
 ## Confidence Assessment
 
 | Area | Confidence | Notes |
 |------|------------|-------|
-| **Stack** | HIGH | All versions verified against PyPI official pages as of 2026-06-04; Tesseract 5.x widely deployed; pdf2image mature standard; no experimental dependencies |
-| **Features** | HIGH | Table stakes derived from universal batch OCR system expectations; differentiators match documented best practices; anti-features validated against project constraints (CLI-only, local, one-shot) |
-| **Architecture** | HIGH | Producer-consumer pattern standard for batch processing; Windows spawn constraints documented in official Python docs; build order validated against dependency chains and pitfall research |
-| **Pitfalls** | HIGH | Critical pitfalls sourced from official documentation (Tesseract, pdf2image GitHub issues) and Microsoft docs; memory issues verified across multiple sources; PSM/OSD behavior documented in official Tesseract guide |
+| **Stack** | HIGH | v1.0 technologies already validated in production per CLAUDE.md. v1.1 additions (questionary, dataclasses-json, signal/Event) from official PyPI + stdlib docs. All Windows-compatible. Tesseract 5.x + multiprocessing proven in existing codebase. |
+| **Features** | HIGH | Table stakes derived from batch processing best practices (OneUpTime blog series 2026-01-30, graceful shutdown patterns). Differentiators align with campaign management use cases (per-folder stats, interactive menus). Anti-features clearly bounded by project constraints (CLI-only, local, no DB). Source quality high (official docs, industry best practices). |
+| **Architecture** | HIGH | Campaign-wraps-pipeline pattern proven in similar batch systems. Signal handling + Event coordination documented in Python multiprocessing guides and production blog posts (The-Fonz, peterspython.com). Atomic checkpoint writes validated by v1.0 implementation. Windows-specific patterns verified via official Python docs (multiprocessing spawn, signal limitations), GitHub issues (SIGINT handling discussion #90064), and community reports. Separation of concerns reduces integration risk. |
+| **Pitfalls** | HIGH | 10 critical pitfalls sourced from official Python bug tracker (issue #23051 imap deadlock, issue #38263 DupHandle race, issue #35629 Pool hang), stdlib signal docs (Windows limitations SIGINT/SIGBREAK only), multiprocessing docs (spawn vs fork), and production experience reports (tqdm terminal corruption, Manager IPC overhead, OSD unreliability). All have documented mitigations with code examples. Windows spawn behavior well-understood. |
 
 **Overall confidence:** HIGH
 
-Research converges on proven patterns with mature tooling. No experimental technologies, no unvalidated assumptions. Windows-specific constraints (spawn, memory leaks, path limits) are well-documented with tested mitigation strategies. Risk is low for this tech stack and architecture.
+Research is comprehensive with authoritative sources (official docs, PyPI, Python tracker, production experience). The v1.0 baseline already validates core patterns (Tesseract + multiprocessing + atomic checkpoints) in this codebase. v1.1 additions are well-trodden patterns (signal handling, interactive menus, stats aggregation) with stdlib-focused implementations that minimize external dependencies and Windows compatibility risks. Recommendations are prescriptive with specific code patterns and known pitfall mitigations.
 
 ### Gaps to Address
 
 **Minor gaps requiring validation during implementation:**
 
-1. **Actual scan quality distribution:** Research assumes mix of high-quality and degraded scans; preprocessing effectiveness (Phase 5) depends on actual scan quality distribution in the 30K corpus. **Mitigation:** Run Phase 1-2 on sample (100 PDFs) to measure baseline success rate before designing Phase 5 preprocessing.
+1. **Windows-specific multiprocessing edge cases:** Research documents known pitfalls and mitigations, but Windows 'spawn' mode has subtle timing issues around Pool shutdown that can't be fully validated without manual testing. **Mitigation:** Phase 2 must include extensive manual QA on Windows 10 with large batches (1000+ PDFs), Ctrl+C at various points (early/mid/late), second Ctrl+C force-quit, and process cleanup verification in Task Manager. Create test checklist based on pitfalls research.
 
-2. **Windows spawn performance on user's hardware:** Research documents spawn overhead, but actual performance (process creation time, pickle costs) varies with CPU, RAM, and disk speed. **Mitigation:** Phase 3 spike (4-8 hours) to benchmark ProcessPoolExecutor on target hardware with realistic workload before committing to full parallelization phase.
+2. **questionary Windows compatibility:** Research indicates questionary 2.1.1 supports Windows via prompt_toolkit, but some users report terminal encoding issues on older Windows consoles. **Mitigation:** Include fallback to stdlib `input()` if questionary import fails or raises exceptions; test on Windows 10 cmd.exe and PowerShell terminals. If issues arise, use `input()` fallback (already designed). pick library with blessed backend is documented secondary fallback.
 
-3. **"Precede" keyword consistency:** Research assumes "Precede" cursive text appears near IDs for contextual validation, but actual consistency unknown. **Mitigation:** Sample validation in Phase 1 to determine if contextual extraction (regex near "Precede") is viable or if isolated 5-digit regex sufficient.
+3. **dataclasses-json Python 3.14 support:** Library officially supports Python 3.7-3.12; no official 3.13+ release yet (as of June 2024 release). **Mitigation:** Test compatibility on Python 3.14 (project environment). If issues arise, use stdlib fallback: `json` + `dataclasses.asdict()` pattern (more manual but zero dependencies, already documented in research).
 
-4. **Tesseract 5.x memory leak severity:** Research documents Tesseract 4.x memory leak on Windows; Tesseract 5.x may have improved but not explicitly verified. **Mitigation:** Monitor memory during Phase 3 parallelization testing; adjust `maxtasksperchild` value based on observed leak rate (100-500 files).
+4. **Checkpoint file size growth:** With 30K+ PDFs, `campaign_state.json` folder stats could grow large if deeply nested directories. **Mitigation:** Monitor file size during Phase 4 testing; if > 10MB, consider storing only top-level folder aggregates or compressing with gzip. Research shows JSON sufficient but validate at scale.
 
-5. **Multiple IDs per page frequency:** Research flags multiple IDs per page as table stakes feature, but actual frequency unknown. **Mitigation:** Phase 1 sample testing determines if this is edge case (<5% of pages) or common pattern, informing output format design.
+5. **tqdm terminal corruption edge cases:** Research documents tqdm.close() in finally block prevents most corruption, but some Windows terminals (older cmd.exe) may still have issues. **Mitigation:** Test on target Windows 10 environment; if issues persist, consider tqdm-multiprocess library (documented in STACK.md) or fallback to simple print() progress (less UX but more robust).
 
-**All gaps are validation questions, not research gaps.** Existing research provides proven mitigation strategies; implementation needs to tune parameters based on actual data characteristics.
+**All gaps are validation questions, not research gaps.** Existing research provides proven mitigation strategies; implementation needs to validate on target hardware/OS and tune based on observed behavior (e.g., adjust Pool timeout values, choose questionary vs input() based on terminal compatibility).
 
 ## Sources
 
 ### Primary (HIGH confidence)
 
 **Official Documentation:**
-- pytesseract PyPI (version, API, config options)
-- pdf2image PyPI + GitHub (memory management, parameters)
-- Tesseract Official Documentation (PSM modes, improving quality, release notes)
-- Python multiprocessing documentation (spawn vs fork, Pool API, Windows constraints)
-- Microsoft documentation (Windows path limits, resource management)
-- OpenCV official documentation (preprocessing functions)
-- Pillow PyPI (image operations, rotation)
+- Python stdlib documentation: signal, multiprocessing, pathlib, tempfile, collections, dataclasses — official Python 3.14 docs validate all core patterns
+- PyPI official pages: pytesseract, pdf2image, Pillow, opencv-python, pandas, tqdm, questionary, dataclasses-json, pick — version info, dependencies, platform support
+- Python bug tracker: Issue #23051 (imap deadlock), Issue #38263 (DupHandle race), Issue #35629 (Pool hang) — known multiprocessing pitfalls with documented workarounds
+- Tesseract GitHub: Issue #4426 (OSD unreliability June 2025) — validates multi-rotation strategy over OSD
 
-**Verified Technical Issues:**
-- Tesseract GitHub Issue #2541 (RAM not released on Windows)
-- Tesseract GitHub Issue #1701, #1926 (OSD unreliability)
-- Tesseract GitHub Issue #4407 (whitelist not working)
-- pdf2image GitHub Issue #54 (memory leak)
-- Python CPython Issue #96953 (multiprocessing pickle performance)
+**Windows-specific:**
+- Microsoft documentation: Windows signal handling (SIGINT/SIGBREAK only), file system operations (MoveFileEx atomicity)
+- Python Windows multiprocessing: spawn method requirements, pickle overhead, process creation costs
 
 ### Secondary (MEDIUM confidence)
 
-**Technical Comparisons:**
-- PyImageSearch: Tesseract PSM Modes Explained (detailed tutorial with examples)
-- Python Speed: Faster Multiprocessing Pickle (performance analysis)
-- Medium: Python Multiprocessing Fork vs Spawn (Windows behavior)
-- FreeCodeCamp: Image Preprocessing for Tesseract (preprocessing guidelines)
+**Batch Processing Best Practices:**
+- OneUpTime blog series (2026-01-30): batch statistics, monitoring, reporting, metrics — establishes table stakes features
+- Campaign management patterns: Google Patents GB2364399A, GE Digital Campaign Manager Guide — validates campaign workflow patterns
+- Checkpoint/resume workflows: fast.io AI agent checkpointing, Microsoft Learn workflows — confirms checkpoint-based resume patterns
 
-**Best Practices:**
-- Batch OCR processing patterns (multiple 2026 sources converge on producer-consumer)
-- OCR accuracy benchmarks (85-92% without preprocessing, 95-98% with)
-- Error handling and retry logic (exponential backoff standard pattern)
-- Progress tracking with tqdm (multiprocessing integration documented)
+**Graceful Shutdown Patterns:**
+- Zylos.ai research (2026-02-25): graceful shutdown for long-lived services — validates Event-based coordination
+- River docs: graceful shutdown patterns — confirms signal handling approach
+- The-Fonz blog: graceful exit with Python multiprocessing — code examples for Pool cleanup
+- peterspython.com (2026): multiprocessing graceful shutdown in proper order — validates close → join → terminate sequence
+- DEV Community (2026): Go shutdown patterns (concepts applicable to Python) — general shutdown principles
+
+**Interactive CLI Patterns:**
+- InquirerPy GitHub + docs: interactive CLI prompts and menus — validates questionary choice
+- ArjanCodes blog: Rich Python library for interactive CLI tools — confirms Rich + questionary integration
+- The Green Report: interactive CLI automation with Python — validates prompt_toolkit approach
+
+**Progress Tracking:**
+- Rich documentation: progress display, multi-threading visualization — validates Rich Progress patterns
+- Lei Mao's Log Book: Python tqdm multiprocessing — confirms tqdm.close() in finally block
+- Redowan's Reflections: running tqdm with multiprocessing — validates process_map() approach
+
+**Atomic File Operations:**
+- Crash-safe JSON (2026 dev.to): atomic writes + recovery patterns — validates tempfile + fsync + os.replace
+- BSWEN blog (2026-04-04): atomic file writing in Python — confirms no partial writes pattern
 
 ### Tertiary (LOW confidence)
 
-- Joblib Loky speedup claims (6-10x) — not verified for this specific workload
-- Specific accuracy percentages for Tesseract on numeric IDs — benchmarks are general text, not numeric-specific
-- Optimal DPI for small digits — 300 DPI widely recommended, but "optimal" depends on scan quality
+**OCR Comparisons:**
+- Codesota (2026), TTSforFree (2026): Tesseract vs EasyOCR comparisons — used for stack selection but not critical to campaign features
+- DocSumo: OCR accuracy analysis — general benchmarks, not specific to this project
 
-**Source aggregation:** 70+ sources reviewed across 4 research files; convergence across official docs, GitHub issues, and technical tutorials provides HIGH confidence for recommendations.
+**Source aggregation:** 60+ sources reviewed across 4 research files (STACK.md, FEATURES.md, ARCHITECTURE.md, PITFALLS.md); convergence across official docs, GitHub issues, Python tracker, and technical blogs provides HIGH confidence for campaign management recommendations. v1.0 baseline already validates OCR stack; v1.1 focuses on orchestration patterns which are well-documented in stdlib and community best practices.
 
 ---
 
-**Research completed:** 2026-06-04
+**Research completed:** 2026-06-05
 **Ready for roadmap:** Yes
 
 **Next steps for orchestrator:**
 1. Load SUMMARY.md as context for roadmap creation
-2. Use suggested 5-phase structure as starting point
-3. Apply research flags (all phases skip research-phase; Phase 3 and 5 need validation spikes)
+2. Use suggested 4-phase structure as starting point
+3. Apply research flags (all phases skip research-phase; Phase 2 needs extensive manual testing)
 4. Reference STACK.md, FEATURES.md, ARCHITECTURE.md, PITFALLS.md for detailed specifications during phase planning
+5. Note: v1.0 baseline already complete per CLAUDE.md; roadmap should focus on v1.1 campaign management additions only
