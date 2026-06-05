@@ -27,8 +27,12 @@ Reliably extract every Precede ID from every page across 30K+ PDFs so the user c
 
 ### Active
 
-- [ ] Preprocess low-quality scans (grayscale, threshold, denoise) as fallback
-- [ ] Handle OCR near-misses (O/0, I/1, S/5 confusion) with normalization
+(None — all v1 requirements validated)
+
+### Recently Validated
+
+- [x] Preprocess low-quality scans (grayscale, threshold, denoise) as fallback — Validated in Phase 5: Quality
+- [x] Handle OCR near-misses (O/0, I/1, S/5 confusion) with normalization — Validated in Phase 5: Quality (digit whitelist + normalize_digits)
 
 ### Out of Scope
 
@@ -83,4 +87,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-05 after Phase 4 completion*
+*Last updated: 2026-06-05 after Phase 5 completion — all v1 phases complete*
