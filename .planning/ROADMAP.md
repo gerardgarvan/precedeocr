@@ -85,10 +85,11 @@ Plans:
   2. Common OCR digit confusion (O/0, I/1, S/5) is normalized before regex matching
   3. Preprocessing is applied conditionally only when initial OCR finds no ID
   4. User can identify which extractions used preprocessing vs. direct OCR
-**Plans:** 2 plans
+**Plans:** 3 plans
 Plans:
 - [x] 05-01-PLAN.md — Conditional preprocessing fallback: install OpenCV, add preprocess_image(), wire into extract_id_with_rotation()
 - [x] 05-02-PLAN.md — Sequential ID validation: add validate_sequence() with linear regression + MAD outlier detection, wire into main()
+- [ ] 05-03-PLAN.md — Gap closure: fix validate_sequence() to use Theil-Sen robust regression, correct outlier flagging and confidence scoring
 
 ## Progress
 
@@ -98,7 +99,7 @@ Plans:
 | 2. Rotation Handling | 1/1 | Complete | 2026-06-05 |
 | 3. Scale | 2/2 | Complete   | 2026-06-05 |
 | 4. Resilience | 2/2 | Complete   | 2026-06-05 |
-| 5. Quality | 0/2 | Planned | - |
+| 5. Quality | 2/3 | Gap closure | - |
 
 ## Dependencies
 
