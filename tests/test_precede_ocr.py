@@ -205,6 +205,77 @@ class TestWriteResultsCsv:
         assert rows[2][2] == ''  # no-ID page
 
 
+# -- write_results_json tests --
+
+class TestWriteResultsJson:
+    def test_creates_json_file(self, sample_results, temp_dir):
+        output_path = str(Path(temp_dir) / "test_output.json")
+        write_results_json(sample_results, output_path)
+        assert Path(output_path).is_file()
+
+    def test_json_is_valid(self, sample_results, temp_dir):
+        output_path = str(Path(temp_dir) / "test_output.json")
+        write_results_json(sample_results, output_path)
+        with open(output_path, 'r') as f:
+            data = json.load(f)
+        assert isinstance(data, dict)
+
+    def test_json_nested_structure(self, sample_results, temp_dir):
+        """Per D-04: {filename: {page_str: [ids]}}"""
+        output_path = str(Path(temp_dir) / "test_output.json")
+        write_results_json(sample_results, output_path)
+        with open(output_path, 'r') as f:
+            data = json.load(f)
+        assert 'test.pdf' in data
+        assert '1' in data['test.pdf']
+        assert data['test.pdf']['1'] == ['12345']
+        assert data['test.pdf']['3'] == ['67890']
+
+    def test_json_no_id_pages_empty_array(self, sample_results, temp_dir):
+        """Per PIPE-07 and D-04: no-ID pages show as empty array"""
+        output_path = str(Path(temp_dir) / "test_output.json")
+        write_results_json(sample_results, output_path)
+        with open(output_path, 'r') as f:
+            data = json.load(f)
+        assert data['test.pdf']['2'] == []
+
+    def test_json_multiple_ids_per_page(self, multi_id_results, temp_dir):
+        output_path = str(Path(temp_dir) / "test_output.json")
+        write_results_json(multi_id_results, output_path)
+        with open(output_path, 'r') as f:
+            data = json.load(f)
+        assert data['test.pdf']['1'] == ['12345', '67890']
+
+    def test_json_page_keys_are_strings(self, sample_results, temp_dir):
+        output_path = str(Path(temp_dir) / "test_output.json")
+        write_results_json(sample_results, output_path)
+        with open(output_path, 'r') as f:
+            data = json.load(f)
+        for filename in data:
+            for page_key in data[filename]:
+                assert isinstance(page_key, str)
+
+    def test_json_creates_parent_directories(self, temp_dir):
+        output_path = str(Path(temp_dir) / "nested" / "dir" / "output.json")
+        results = [{'filename': 'a.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': ''}]
+        write_results_json(results, output_path)
+        assert Path(output_path).is_file()
+
+    def test_json_multiple_files(self, temp_dir):
+        results = [
+            {'filename': 'a.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': ''},
+            {'filename': 'b.pdf', 'page': 1, 'ids': ['67890'], 'rotation_detected': 90, 'notes': ''},
+        ]
+        output_path = str(Path(temp_dir) / "test_output.json")
+        write_results_json(results, output_path)
+        with open(output_path, 'r') as f:
+            data = json.load(f)
+        assert 'a.pdf' in data
+        assert 'b.pdf' in data
+        assert data['a.pdf']['1'] == ['12345']
+        assert data['b.pdf']['1'] == ['67890']
+
+
 # -- extract_id_with_rotation tests --
 
 class TestExtractIdWithRotation:
