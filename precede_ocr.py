@@ -26,7 +26,7 @@ import numpy as np
 import pytesseract
 import pandas as pd
 from pdf2image import convert_from_path
-from scipy.stats import linregress
+from scipy.stats import theilslopes
 
 # Configure Tesseract path (auto-detect common Windows locations)
 TESSERACT_SEARCH_PATHS = [
@@ -667,20 +667,28 @@ def print_batch_stats(stats: dict) -> None:
 
 def validate_sequence(results: list[dict]) -> list[dict]:
     """
-    Flag out-of-sequence IDs using linear regression + MAD outlier detection.
+    Flag out-of-sequence IDs using Theil-Sen robust regression + MAD outlier detection.
 
     Per D-06: Post-hoc trend-based sequence check within each file.
     Per D-07: Flag + confidence score for out-of-sequence IDs. Keep ID in results.
     Per D-08: 270-degree rotations are particularly suspect for false positives.
 
+    Uses Theil-Sen estimator (median of pairwise slopes) instead of OLS linear
+    regression. Theil-Sen is robust to up to ~29% outliers, preventing extreme
+    values from pulling the fit line and causing false flags on normal IDs.
+
+    For small samples (< 5 IDs), uses deviation-from-median instead of regression,
+    since Theil-Sen's breakdown point (29%) is too easily exceeded with few points.
+
     For each file:
-    1. Sort results by page number (Pitfall 3: handle imap_unordered order)
+    1. Sort results by page number (handle imap_unordered order)
     2. Extract (page_number, id_value) pairs from rows with valid IDs
-    3. Skip files with < 3 ID data points (unreliable regression)
-    4. Fit linear regression (page -> ID value)
-    5. Calculate residuals and MAD (median absolute deviation)
-    6. Flag IDs with |residual| > 1.5 * MAD as outliers
-    7. Append confidence score to notes column
+    3. Skip files with < 3 ID data points (unreliable detection)
+    4. For 3-4 IDs: deviation-from-median outlier detection
+    5. For 5+ IDs: Theil-Sen robust regression (page -> ID value)
+    6. Calculate residuals and MAD (median absolute deviation)
+    7. Flag ONLY IDs with |residual| > threshold as outliers
+    8. Confidence = how far beyond threshold (higher % = more likely outlier)
 
     Args:
         results: Flat list of result dicts from process_all_pdfs/process_single_pdf
@@ -697,7 +705,7 @@ def validate_sequence(results: list[dict]) -> list[dict]:
     validated_results = []
 
     for filename, file_results in by_file.items():
-        # Pitfall 3: Sort by page number before analysis
+        # Sort by page number before analysis (handle imap_unordered)
         file_results = sorted(file_results, key=lambda r: r['page'])
 
         # Extract rows with valid IDs (skip error rows and no-ID pages)
@@ -705,7 +713,6 @@ def validate_sequence(results: list[dict]) -> list[dict]:
                       and 'error:' not in r.get('notes', '')]
 
         if len(valid_rows) < 3:
-            # Too few data points for meaningful regression (Claude's discretion: need 3+)
             validated_results.extend(file_results)
             continue
 
@@ -719,55 +726,103 @@ def validate_sequence(results: list[dict]) -> list[dict]:
             validated_results.extend(file_results)
             continue
 
-        # Fit linear regression: page_number (X) -> id_value (Y)
         pages = [p for p, _ in page_id_pairs]
         id_values = [i for _, i in page_id_pairs]
 
-        slope, intercept, r_value, p_value, std_err = linregress(pages, id_values)
+        # Choose detection method based on sample size:
+        # - Small samples (< 5): Theil-Sen breakdown point (~29%) is too easily
+        #   exceeded (e.g., 1 outlier in 3 = 33%), so use Tukey box-plot fences
+        #   on the raw ID values for robust outlier detection.
+        # - Larger samples (>= 5): Theil-Sen robust regression handles outliers well.
+        if len(page_id_pairs) < 5:
+            # Modified Z-score method on raw ID values: robust for small samples.
+            # Theil-Sen breakdown point (~29%) is too easily exceeded with 3-4 points,
+            # so we use deviation from median with MAD-based scoring instead.
+            median_id = float(np.median(id_values))
+            deviations = [abs(v - median_id) for v in id_values]
+            mad_ids = float(np.median(deviations))
 
-        # Calculate residuals (absolute difference from predicted)
-        residuals = [abs(actual - (slope * page + intercept))
-                     for page, actual in page_id_pairs]
+            if mad_ids == 0:
+                # All IDs identical or nearly so -- no outliers possible
+                validated_results.extend(file_results)
+                continue
 
-        # Calculate MAD (median absolute deviation from median residual)
-        median_residual = float(np.median(residuals))
-        mad = float(np.median([abs(r - median_residual) for r in residuals]))
+            # Modified Z-score threshold: flag if |0.6745 * deviation / MAD| > 3.5
+            # This is the standard Iglewicz & Hoaglin cutoff for outlier detection.
+            outlier_lookup = {}
+            idx = 0
+            for r in valid_rows:
+                for id_val in r['ids']:
+                    deviation = deviations[idx]
+                    modified_z = 0.6745 * deviation / mad_ids
+                    if modified_z > 3.5:
+                        # Confidence: scale from 50% at threshold to 100% at 2x threshold
+                        confidence_pct = min(100, int(modified_z / 3.5 * 50))
+                        outlier_lookup[(r['page'], id_val)] = max(confidence_pct, 1)
+                    idx += 1
+        else:
+            # Fit Theil-Sen robust regression: page_number (X) -> id_value (Y)
+            # theilslopes(y, x) returns (slope, intercept, low_slope, high_slope)
+            slope, intercept, _, _ = theilslopes(id_values, pages)
 
-        # Pitfall 4: MAD == 0 means perfect fit, no outliers possible
-        if mad == 0:
-            validated_results.extend(file_results)
-            continue
+            # Calculate residuals (absolute difference from predicted)
+            residuals = [abs(actual - (slope * page + intercept))
+                         for page, actual in page_id_pairs]
 
-        threshold = 1.5 * mad
+            # Calculate MAD (median absolute deviation from median residual)
+            median_residual = float(np.median(residuals))
+            mad = float(np.median([abs(r - median_residual) for r in residuals]))
 
-        # Build lookup: (page, id_val) -> residual for flagging
-        residual_lookup = {}
-        idx = 0
-        for r in valid_rows:
-            for id_val in r['ids']:
-                residual_lookup[(r['page'], id_val)] = residuals[idx]
-                idx += 1
+            # Determine threshold for outlier detection
+            max_residual = max(residuals)
 
-        # Flag outliers in results
+            if mad > 0:
+                # Standard case: use 1.5 * MAD
+                threshold = 1.5 * mad
+            elif max_residual == 0:
+                # Perfect fit, all residuals zero -- no outliers possible
+                validated_results.extend(file_results)
+                continue
+            else:
+                # MAD == 0 but some residuals are non-zero.
+                # This happens when Theil-Sen fits the majority perfectly
+                # (residuals cluster at the same small value) but outliers have
+                # huge residuals. Use 3x median_residual as threshold; if median
+                # is 0 (perfect fit for majority), use a minimal threshold of 1.0.
+                threshold = max(median_residual * 3, 1.0)
+
+            # Build outlier lookup for regression method
+            outlier_lookup = {}
+            idx = 0
+            for r in valid_rows:
+                for id_val in r['ids']:
+                    residual = residuals[idx]
+                    if residual > threshold:
+                        # Higher residual = higher confidence it's an outlier
+                        confidence_pct = min(100, int(residual / threshold * 100))
+                        outlier_lookup[(r['page'], id_val)] = confidence_pct
+                    idx += 1
+
+        # Apply flags to results (only outlier rows get flagged)
         for r in file_results:
             updated_r = r.copy()
 
             if updated_r['ids'] and updated_r['page'] > 0 and 'error:' not in updated_r.get('notes', ''):
+                # Collect outlier flags for ALL IDs in this row
+                flags = []
                 for id_val in updated_r['ids']:
                     key = (updated_r['page'], id_val)
-                    residual = residual_lookup.get(key, 0)
+                    if key in outlier_lookup:
+                        conf = outlier_lookup[key]
+                        flags.append(f"seq_outlier_conf_{conf}%")
 
-                    if residual > threshold:
-                        # Calculate confidence: higher residual = lower confidence
-                        # 100% = exactly at threshold, 0% = very far from threshold
-                        confidence_pct = max(0, 100 - (residual / threshold * 50))
-                        flag = f"seq_outlier_conf_{confidence_pct:.0f}%"
-
-                        # Append to notes (may already contain 'preprocessed' etc.)
-                        if updated_r['notes']:
-                            updated_r['notes'] += f"; {flag}"
-                        else:
-                            updated_r['notes'] = flag
+                # Append combined flags ONCE (avoids duplicate flag bug)
+                if flags:
+                    combined_flag = '; '.join(flags)
+                    if updated_r['notes']:
+                        updated_r['notes'] += f"; {combined_flag}"
+                    else:
+                        updated_r['notes'] = combined_flag
 
             validated_results.append(updated_r)
 
