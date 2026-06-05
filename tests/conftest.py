@@ -14,9 +14,18 @@ def temp_dir():
 
 @pytest.fixture
 def sample_results():
-    """Sample pipeline results for CSV output testing."""
+    """Sample pipeline results for CSV/JSON output testing (new multi-ID contract)."""
     return [
-        {'filename': 'test.pdf', 'page': 1, 'id': '12345', 'rotation_detected': 90, 'notes': ''},
-        {'filename': 'test.pdf', 'page': 2, 'id': None, 'rotation_detected': None, 'notes': 'no_text_detected'},
-        {'filename': 'test.pdf', 'page': 3, 'id': '67890', 'rotation_detected': 0, 'notes': ''},
+        {'filename': 'test.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': ''},
+        {'filename': 'test.pdf', 'page': 2, 'ids': [], 'rotation_detected': None, 'notes': 'no_text_detected'},
+        {'filename': 'test.pdf', 'page': 3, 'ids': ['67890'], 'rotation_detected': 0, 'notes': ''},
+    ]
+
+
+@pytest.fixture
+def multi_id_results():
+    """Sample results with multiple IDs on a single page."""
+    return [
+        {'filename': 'test.pdf', 'page': 1, 'ids': ['12345', '67890'], 'rotation_detected': 90, 'notes': ''},
+        {'filename': 'test.pdf', 'page': 2, 'ids': [], 'rotation_detected': None, 'notes': 'no_text_detected'},
     ]

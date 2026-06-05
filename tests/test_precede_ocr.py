@@ -1,5 +1,6 @@
 import pytest
 import csv
+import json
 import sys
 import io
 from pathlib import Path
@@ -9,8 +10,10 @@ from unittest.mock import patch, MagicMock
 from precede_ocr import (
     normalize_digits,
     select_most_likely_id,
+    select_all_valid_ids,
     extract_id_with_rotation,
     write_results_csv,
+    write_results_json,
     classify_failure_reason,
     print_rotation_summary,
 )
@@ -82,6 +85,30 @@ class TestSelectMostLikelyId:
         assert result == "54321"
 
 
+# -- select_all_valid_ids tests --
+
+class TestSelectAllValidIds:
+    def test_returns_all_valid_matches(self):
+        assert select_all_valid_ids(["12345", "67890"]) == ["12345", "67890"]
+
+    def test_filters_trivial_patterns(self):
+        # Per D-03: filter 00000, 11111, etc.
+        assert select_all_valid_ids(["00000", "12345", "11111"]) == ["12345"]
+
+    def test_all_trivial_returns_empty(self):
+        # Unlike select_most_likely_id, do NOT fall back to trivial matches
+        assert select_all_valid_ids(["00000", "11111"]) == []
+
+    def test_empty_input_returns_empty(self):
+        assert select_all_valid_ids([]) == []
+
+    def test_single_valid_match(self):
+        assert select_all_valid_ids(["54321"]) == ["54321"]
+
+    def test_preserves_order(self):
+        assert select_all_valid_ids(["67890", "12345"]) == ["67890", "12345"]
+
+
 # -- write_results_csv tests --
 
 class TestWriteResultsCsv:
@@ -105,6 +132,7 @@ class TestWriteResultsCsv:
             reader = csv.reader(f)
             next(reader)
             rows = list(reader)
+        # 3 pages: page 1 has 1 ID (1 row), page 2 has 0 IDs (1 row with blank), page 3 has 1 ID (1 row)
         assert len(rows) == 3
 
     def test_csv_includes_no_match_rows(self, sample_results, temp_dir):
@@ -119,7 +147,7 @@ class TestWriteResultsCsv:
 
     def test_csv_creates_parent_directories(self, temp_dir):
         output_path = str(Path(temp_dir) / "nested" / "dir" / "output.csv")
-        results = [{'filename': 'a.pdf', 'page': 1, 'id': '12345', 'rotation_detected': 0, 'notes': ''}]
+        results = [{'filename': 'a.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 0, 'notes': ''}]
         write_results_csv(results, output_path)
         assert Path(output_path).is_file()
 
@@ -134,7 +162,7 @@ class TestWriteResultsCsv:
         assert headers == ["filename", "page", "id", "rotation_detected", "notes"]
 
     def test_csv_notes_populated_for_no_match(self, sample_results, temp_dir):
-        """Verify notes column has failure reason for rows where id is None."""
+        """Verify notes column has failure reason for rows where ids is empty."""
         output_path = str(Path(temp_dir) / "test_output.csv")
         write_results_csv(sample_results, output_path)
         with open(output_path, "r") as f:
@@ -142,13 +170,13 @@ class TestWriteResultsCsv:
             next(reader)  # Skip headers
             rows = list(reader)
 
-        # Page 2 has no ID (None), should have failure reason in notes
+        # Page 2 has no IDs (empty list), should have failure reason in notes
         page2_row = rows[1]
         assert page2_row[2] == ''  # id column is empty
         assert page2_row[4] == 'no_text_detected'  # notes column has reason
 
     def test_csv_notes_empty_for_match(self, sample_results, temp_dir):
-        """Verify notes column is empty string for rows where id is not None."""
+        """Verify notes column is empty string for rows where ids is not empty."""
         output_path = str(Path(temp_dir) / "test_output.csv")
         write_results_csv(sample_results, output_path)
         with open(output_path, "r") as f:
@@ -161,6 +189,21 @@ class TestWriteResultsCsv:
         assert page1_row[2] == '12345'  # id column has value
         assert page1_row[4] == ''  # notes column is empty
 
+    def test_csv_multiple_ids_per_page_creates_multiple_rows(self, multi_id_results, temp_dir):
+        """Per D-01: multiple IDs on one page create one row per ID."""
+        output_path = str(Path(temp_dir) / "test_output.csv")
+        write_results_csv(multi_id_results, output_path)
+        with open(output_path, "r") as f:
+            reader = csv.reader(f)
+            next(reader)  # skip header
+            rows = list(reader)
+        # Page 1 has 2 IDs = 2 rows, Page 2 has 0 IDs = 1 row (blank id)
+        assert len(rows) == 3
+        assert rows[0][2] == '12345'  # first ID
+        assert rows[1][2] == '67890'  # second ID
+        assert rows[0][1] == rows[1][1] == '1'  # same page number
+        assert rows[2][2] == ''  # no-ID page
+
 
 # -- extract_id_with_rotation tests --
 
@@ -172,11 +215,11 @@ class TestExtractIdWithRotation:
         assert isinstance(result, tuple)
         assert len(result) == 3
 
-    def test_blank_image_returns_none(self):
-        """A blank white image should yield no ID."""
+    def test_blank_image_returns_empty_list(self):
+        """A blank white image should yield empty list of IDs."""
         img = Image.new("RGB", (200, 100), color="white")
-        id_found, rotation, notes = extract_id_with_rotation(img)
-        assert id_found is None
+        ids, rotation, notes = extract_id_with_rotation(img)
+        assert ids == []
         assert rotation is None
         assert notes == 'no_text_detected'
 
@@ -184,26 +227,19 @@ class TestExtractIdWithRotation:
         """Verify rotation order is [90, 270, 0, 180] and 90 is tried first."""
         img = Image.new("RGB", (100, 50), color="white")
 
-        # Mock pytesseract to return '12345' only when called at 90 degrees
-        # Track which rotation angles are tested
         call_count = [0]
-        angles_tested = []
 
         def mock_ocr(image, config=None):
             call_count[0] += 1
-            # The rotation order should be [90, 270, 0, 180]
-            # We return '12345' on the first call (90 degrees)
             if call_count[0] == 1:
-                angles_tested.append('first_call')
                 return '12345'
             else:
-                angles_tested.append(f'call_{call_count[0]}')
                 return ''
 
         with patch('precede_ocr.pytesseract.image_to_string', side_effect=mock_ocr):
-            id_found, rotation, notes = extract_id_with_rotation(img)
+            ids, rotation, notes = extract_id_with_rotation(img)
 
-        assert id_found == '12345'
+        assert ids == ['12345']
         assert rotation == 90
         assert notes == ''
         assert call_count[0] == 1  # Early exit after first match
@@ -219,10 +255,10 @@ class TestExtractIdWithRotation:
             return '12345'  # Always return match
 
         with patch('precede_ocr.pytesseract.image_to_string', side_effect=mock_ocr):
-            id_found, rotation, notes = extract_id_with_rotation(img)
+            ids, rotation, notes = extract_id_with_rotation(img)
 
         assert call_count[0] == 1  # Only one call made
-        assert id_found == '12345'
+        assert ids == ['12345']
         assert rotation == 90
 
     def test_fallback_to_later_angles(self):
@@ -233,20 +269,19 @@ class TestExtractIdWithRotation:
 
         def mock_ocr(image, config=None):
             call_count[0] += 1
-            # Return empty for 90, 270, then '12345' at 0 degrees (3rd call)
             if call_count[0] == 3:
                 return '12345'
             return ''
 
         with patch('precede_ocr.pytesseract.image_to_string', side_effect=mock_ocr):
-            id_found, rotation, notes = extract_id_with_rotation(img)
+            ids, rotation, notes = extract_id_with_rotation(img)
 
-        assert id_found == '12345'
+        assert ids == ['12345']
         assert rotation == 0  # Found at 0 degrees (3rd in order)
         assert notes == ''
 
     def test_returns_three_values(self):
-        """Verify return is now a 3-tuple (id, angle, notes)."""
+        """Verify return is a 3-tuple (list, angle, notes)."""
         img = Image.new("RGB", (100, 50), color="white")
 
         with patch('precede_ocr.pytesseract.image_to_string', return_value=''):
@@ -254,10 +289,33 @@ class TestExtractIdWithRotation:
 
         assert isinstance(result, tuple)
         assert len(result) == 3
-        id_found, rotation, notes = result
-        assert id_found is None
+        ids, rotation, notes = result
+        assert ids == []
+        assert isinstance(ids, list)
         assert rotation is None
         assert isinstance(notes, str)
+
+    def test_extract_id_returns_list_of_ids(self):
+        """extract_id_with_rotation returns list of all IDs found at successful rotation."""
+        img = Image.new("RGB", (100, 50), color="white")
+
+        def mock_ocr(image, config=None):
+            return '12345 67890'
+
+        with patch('precede_ocr.pytesseract.image_to_string', side_effect=mock_ocr):
+            ids, rotation, notes = extract_id_with_rotation(img)
+        assert isinstance(ids, list)
+        assert ids == ['12345', '67890']
+        assert rotation == 90
+        assert notes == ''
+
+    def test_extract_id_no_match_returns_empty_list(self):
+        """extract_id_with_rotation with no matches returns empty list."""
+        img = Image.new("RGB", (100, 50), color="white")
+        with patch('precede_ocr.pytesseract.image_to_string', return_value=''):
+            ids, rotation, notes = extract_id_with_rotation(img)
+        assert ids == []
+        assert rotation is None
 
 
 # -- classify_failure_reason tests --
@@ -336,9 +394,9 @@ class TestPrintRotationSummary:
     def test_prints_rotation_counts(self, capsys):
         """Verify rotation counts appear in output."""
         results = [
-            {'filename': 'test.pdf', 'page': 1, 'id': '12345', 'rotation_detected': 90, 'notes': ''},
-            {'filename': 'test.pdf', 'page': 2, 'id': '67890', 'rotation_detected': 90, 'notes': ''},
-            {'filename': 'test.pdf', 'page': 3, 'id': '11111', 'rotation_detected': 0, 'notes': ''},
+            {'filename': 'test.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': ''},
+            {'filename': 'test.pdf', 'page': 2, 'ids': ['67890'], 'rotation_detected': 90, 'notes': ''},
+            {'filename': 'test.pdf', 'page': 3, 'ids': ['11111'], 'rotation_detected': 0, 'notes': ''},
         ]
 
         print_rotation_summary(results)
@@ -360,7 +418,7 @@ class TestPrintRotationSummary:
     def test_handles_no_match_label(self, capsys):
         """Results with None rotation show 'No match' in output."""
         results = [
-            {'filename': 'test.pdf', 'page': 1, 'id': None, 'rotation_detected': None, 'notes': 'no_text_detected'},
+            {'filename': 'test.pdf', 'page': 1, 'ids': [], 'rotation_detected': None, 'notes': 'no_text_detected'},
         ]
 
         print_rotation_summary(results)
