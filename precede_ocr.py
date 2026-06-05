@@ -26,6 +26,7 @@ import numpy as np
 import pytesseract
 import pandas as pd
 from pdf2image import convert_from_path
+from scipy.stats import linregress
 
 # Configure Tesseract path (auto-detect common Windows locations)
 TESSERACT_SEARCH_PATHS = [
@@ -662,6 +663,115 @@ def print_batch_stats(stats: dict) -> None:
         print(f"  Previously done:  {r['previously_checkpointed']} files")
         print(f"  Newly processed:  {r['newly_processed']} files")
     print("=" * 60)
+
+
+def validate_sequence(results: list[dict]) -> list[dict]:
+    """
+    Flag out-of-sequence IDs using linear regression + MAD outlier detection.
+
+    Per D-06: Post-hoc trend-based sequence check within each file.
+    Per D-07: Flag + confidence score for out-of-sequence IDs. Keep ID in results.
+    Per D-08: 270-degree rotations are particularly suspect for false positives.
+
+    For each file:
+    1. Sort results by page number (Pitfall 3: handle imap_unordered order)
+    2. Extract (page_number, id_value) pairs from rows with valid IDs
+    3. Skip files with < 3 ID data points (unreliable regression)
+    4. Fit linear regression (page -> ID value)
+    5. Calculate residuals and MAD (median absolute deviation)
+    6. Flag IDs with |residual| > 1.5 * MAD as outliers
+    7. Append confidence score to notes column
+
+    Args:
+        results: Flat list of result dicts from process_all_pdfs/process_single_pdf
+
+    Returns:
+        Updated results list with sequence outlier flags in notes column.
+        Original results are NOT modified (copies created).
+    """
+    # Group by filename
+    by_file = defaultdict(list)
+    for r in results:
+        by_file[r['filename']].append(r)
+
+    validated_results = []
+
+    for filename, file_results in by_file.items():
+        # Pitfall 3: Sort by page number before analysis
+        file_results = sorted(file_results, key=lambda r: r['page'])
+
+        # Extract rows with valid IDs (skip error rows and no-ID pages)
+        valid_rows = [r for r in file_results if r['ids'] and r['page'] > 0
+                      and 'error:' not in r.get('notes', '')]
+
+        if len(valid_rows) < 3:
+            # Too few data points for meaningful regression (Claude's discretion: need 3+)
+            validated_results.extend(file_results)
+            continue
+
+        # Flatten multi-ID pages: one (page, id_value) pair per ID
+        page_id_pairs = []
+        for r in valid_rows:
+            for id_val in r['ids']:
+                page_id_pairs.append((r['page'], int(id_val)))
+
+        if len(page_id_pairs) < 3:
+            validated_results.extend(file_results)
+            continue
+
+        # Fit linear regression: page_number (X) -> id_value (Y)
+        pages = [p for p, _ in page_id_pairs]
+        id_values = [i for _, i in page_id_pairs]
+
+        slope, intercept, r_value, p_value, std_err = linregress(pages, id_values)
+
+        # Calculate residuals (absolute difference from predicted)
+        residuals = [abs(actual - (slope * page + intercept))
+                     for page, actual in page_id_pairs]
+
+        # Calculate MAD (median absolute deviation from median residual)
+        median_residual = float(np.median(residuals))
+        mad = float(np.median([abs(r - median_residual) for r in residuals]))
+
+        # Pitfall 4: MAD == 0 means perfect fit, no outliers possible
+        if mad == 0:
+            validated_results.extend(file_results)
+            continue
+
+        threshold = 1.5 * mad
+
+        # Build lookup: (page, id_val) -> residual for flagging
+        residual_lookup = {}
+        idx = 0
+        for r in valid_rows:
+            for id_val in r['ids']:
+                residual_lookup[(r['page'], id_val)] = residuals[idx]
+                idx += 1
+
+        # Flag outliers in results
+        for r in file_results:
+            updated_r = r.copy()
+
+            if updated_r['ids'] and updated_r['page'] > 0 and 'error:' not in updated_r.get('notes', ''):
+                for id_val in updated_r['ids']:
+                    key = (updated_r['page'], id_val)
+                    residual = residual_lookup.get(key, 0)
+
+                    if residual > threshold:
+                        # Calculate confidence: higher residual = lower confidence
+                        # 100% = exactly at threshold, 0% = very far from threshold
+                        confidence_pct = max(0, 100 - (residual / threshold * 50))
+                        flag = f"seq_outlier_conf_{confidence_pct:.0f}%"
+
+                        # Append to notes (may already contain 'preprocessed' etc.)
+                        if updated_r['notes']:
+                            updated_r['notes'] += f"; {flag}"
+                        else:
+                            updated_r['notes'] = flag
+
+            validated_results.append(updated_r)
+
+    return validated_results
 
 
 def _process_single_pdf_with_retry(pdf_path_str: str, debug: bool = False) -> list[dict]:

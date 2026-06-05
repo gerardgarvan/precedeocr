@@ -28,6 +28,7 @@ from precede_ocr import (
     print_batch_stats,
     main,
     preprocess_image,
+    validate_sequence,
 )
 import time as time_module
 
@@ -1396,3 +1397,193 @@ class TestPreprocessingFallback:
                     call_args = mock_classify.call_args[0][0]
                     assert len(call_args) == 8
                     assert call_args == ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
+
+
+# -- validate_sequence tests --
+
+class TestValidateSequence:
+    """Tests for post-hoc sequential ID validation (D-06, D-07, D-08)."""
+
+    def _make_result(self, filename, page, ids, rotation=90, notes=''):
+        """Helper to create result dict."""
+        return {
+            'filename': filename,
+            'page': page,
+            'ids': ids,
+            'rotation_detected': rotation,
+            'notes': notes
+        }
+
+    def test_returns_list_of_dicts(self):
+        """validate_sequence returns a list of dicts."""
+        results = [
+            self._make_result('a.pdf', 1, ['10001']),
+            self._make_result('a.pdf', 2, ['10002']),
+            self._make_result('a.pdf', 3, ['10003']),
+        ]
+        validated = validate_sequence(results)
+        assert isinstance(validated, list)
+        assert all(isinstance(r, dict) for r in validated)
+
+    def test_sequential_ids_not_flagged(self):
+        """File with clean sequential IDs has no seq_outlier flags."""
+        results = [
+            self._make_result('a.pdf', 1, ['10001']),
+            self._make_result('a.pdf', 2, ['10002']),
+            self._make_result('a.pdf', 3, ['10003']),
+            self._make_result('a.pdf', 4, ['10004']),
+            self._make_result('a.pdf', 5, ['10005']),
+        ]
+        validated = validate_sequence(results)
+        for r in validated:
+            assert 'seq_outlier' not in r['notes']
+
+    def test_wild_outlier_flagged(self):
+        """An ID wildly deviating from the trend is flagged with seq_outlier_conf."""
+        results = [
+            self._make_result('a.pdf', 1, ['10001']),
+            self._make_result('a.pdf', 2, ['10002']),
+            self._make_result('a.pdf', 3, ['10003']),
+            self._make_result('a.pdf', 4, ['10004']),
+            self._make_result('a.pdf', 5, ['99999']),  # Wild outlier
+        ]
+        validated = validate_sequence(results)
+        # The outlier (page 5, id 99999) should be flagged
+        page5 = [r for r in validated if r['page'] == 5][0]
+        assert 'seq_outlier_conf_' in page5['notes']
+
+    def test_fewer_than_3_ids_skipped(self):
+        """Files with fewer than 3 valid IDs are not validated (passed through)."""
+        results = [
+            self._make_result('a.pdf', 1, ['10001']),
+            self._make_result('a.pdf', 2, ['10002']),
+        ]
+        validated = validate_sequence(results)
+        for r in validated:
+            assert 'seq_outlier' not in r['notes']
+
+    def test_exactly_3_ids_validated(self):
+        """Files with exactly 3 IDs are validated (minimum for regression)."""
+        results = [
+            self._make_result('a.pdf', 1, ['10001']),
+            self._make_result('a.pdf', 2, ['10002']),
+            self._make_result('a.pdf', 3, ['99999']),  # Outlier
+        ]
+        validated = validate_sequence(results)
+        page3 = [r for r in validated if r['page'] == 3][0]
+        assert 'seq_outlier_conf_' in page3['notes']
+
+    def test_notes_combined_with_semicolon(self):
+        """Existing 'preprocessed' note gets semicolon-separated outlier flag."""
+        results = [
+            self._make_result('a.pdf', 1, ['10001']),
+            self._make_result('a.pdf', 2, ['10002']),
+            self._make_result('a.pdf', 3, ['10003']),
+            self._make_result('a.pdf', 4, ['10004']),
+            self._make_result('a.pdf', 5, ['99999'], notes='preprocessed'),  # Outlier with existing note
+        ]
+        validated = validate_sequence(results)
+        page5 = [r for r in validated if r['page'] == 5][0]
+        assert page5['notes'].startswith('preprocessed; seq_outlier_conf_')
+
+    def test_empty_notes_no_semicolons(self):
+        """Empty notes gets flag without leading semicolons."""
+        results = [
+            self._make_result('a.pdf', 1, ['10001']),
+            self._make_result('a.pdf', 2, ['10002']),
+            self._make_result('a.pdf', 3, ['10003']),
+            self._make_result('a.pdf', 4, ['10004']),
+            self._make_result('a.pdf', 5, ['99999']),  # Outlier with empty notes
+        ]
+        validated = validate_sequence(results)
+        page5 = [r for r in validated if r['page'] == 5][0]
+        assert page5['notes'].startswith('seq_outlier_conf_')
+        assert not page5['notes'].startswith(';')
+
+    def test_error_rows_passed_through(self):
+        """Error rows (page==0, 'error:' in notes) are unchanged."""
+        results = [
+            self._make_result('a.pdf', 1, ['10001']),
+            self._make_result('a.pdf', 2, ['10002']),
+            self._make_result('a.pdf', 3, ['10003']),
+            {'filename': 'b.pdf', 'page': 0, 'ids': [], 'rotation_detected': None,
+             'notes': 'error: ValueError: corrupt'},
+        ]
+        validated = validate_sequence(results)
+        error_row = [r for r in validated if r['filename'] == 'b.pdf'][0]
+        assert error_row['notes'] == 'error: ValueError: corrupt'
+
+    def test_no_id_rows_passed_through(self):
+        """No-ID rows (empty ids list) are unchanged."""
+        results = [
+            self._make_result('a.pdf', 1, ['10001']),
+            self._make_result('a.pdf', 2, ['10002']),
+            self._make_result('a.pdf', 3, ['10003']),
+            self._make_result('a.pdf', 4, [], notes='no_match_any_rotation'),
+        ]
+        validated = validate_sequence(results)
+        no_id_row = [r for r in validated if r['page'] == 4][0]
+        assert no_id_row['notes'] == 'no_match_any_rotation'
+
+    def test_sorts_by_page_before_regression(self):
+        """Results out of page order (from imap_unordered) are sorted before analysis."""
+        # Provide results in random order -- should still work correctly
+        results = [
+            self._make_result('a.pdf', 5, ['99999']),  # Outlier, out of order
+            self._make_result('a.pdf', 2, ['10002']),
+            self._make_result('a.pdf', 4, ['10004']),
+            self._make_result('a.pdf', 1, ['10001']),
+            self._make_result('a.pdf', 3, ['10003']),
+        ]
+        validated = validate_sequence(results)
+        page5 = [r for r in validated if r['page'] == 5][0]
+        assert 'seq_outlier_conf_' in page5['notes']
+
+    def test_mad_zero_no_outliers(self):
+        """Perfect linear sequence (MAD==0) flags no outliers."""
+        results = [
+            self._make_result('a.pdf', 1, ['10001']),
+            self._make_result('a.pdf', 2, ['10002']),
+            self._make_result('a.pdf', 3, ['10003']),
+            self._make_result('a.pdf', 4, ['10004']),
+        ]
+        validated = validate_sequence(results)
+        for r in validated:
+            assert 'seq_outlier' not in r['notes']
+
+    def test_multiple_files_independent(self):
+        """Each file is validated independently."""
+        results = [
+            # File A: clean sequence
+            self._make_result('a.pdf', 1, ['10001']),
+            self._make_result('a.pdf', 2, ['10002']),
+            self._make_result('a.pdf', 3, ['10003']),
+            # File B: has outlier
+            self._make_result('b.pdf', 1, ['20001']),
+            self._make_result('b.pdf', 2, ['20002']),
+            self._make_result('b.pdf', 3, ['20003']),
+            self._make_result('b.pdf', 4, ['99999']),  # Outlier in file B
+        ]
+        validated = validate_sequence(results)
+
+        # File A: no flags
+        a_results = [r for r in validated if r['filename'] == 'a.pdf']
+        for r in a_results:
+            assert 'seq_outlier' not in r['notes']
+
+        # File B: page 4 flagged
+        b_page4 = [r for r in validated if r['filename'] == 'b.pdf' and r['page'] == 4][0]
+        assert 'seq_outlier_conf_' in b_page4['notes']
+
+    def test_does_not_modify_original_results(self):
+        """Original result dicts are not modified (copies created)."""
+        results = [
+            self._make_result('a.pdf', 1, ['10001']),
+            self._make_result('a.pdf', 2, ['10002']),
+            self._make_result('a.pdf', 3, ['10003']),
+            self._make_result('a.pdf', 4, ['99999']),
+        ]
+        original_notes = [r['notes'] for r in results]
+        validate_sequence(results)
+        current_notes = [r['notes'] for r in results]
+        assert original_notes == current_notes
