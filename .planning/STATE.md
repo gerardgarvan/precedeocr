@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: Ready to execute
-last_updated: "2026-06-05T14:37:32.708Z"
+status: Phase complete — ready for verification
+last_updated: "2026-06-05T15:30:21.529Z"
 progress:
   total_phases: 5
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 5
-  completed_plans: 4
+  completed_plans: 5
 ---
 
 # Project State: Precede OCR
@@ -20,14 +20,14 @@ progress:
 
 **Core Value**: Reliably extract every Precede ID from every page across 30K+ PDFs so the user can look up which file and page any given ID lives in.
 
-**Current Focus**: Phase 1 complete. Ready for Phase 2.
+**Current Focus**: Phase 3 complete. Ready for Phase 4.
 
 ## Current Position
 
-Phase: 03 (scale-parallel-processing) — EXECUTING
-Plan: 2 of 2
-**Status**: Phase 1 complete. Ready to plan Phase 2.
-**Progress**: `[████████░░] 80%` (4/5 plans complete)
+Phase: 03 (scale-parallel-processing) — COMPLETE
+Plan: 2 of 2 (all plans complete)
+**Status**: Phase 3 complete. Ready to plan Phase 4 (Resilience).
+**Progress**: `[██████████] 100%` (5/5 plans complete)
 
 ## Performance Metrics
 
@@ -41,6 +41,7 @@ Plan: 2 of 2
 | Phase 01 P02 | 5h | 2 tasks | 5 files |
 | Phase 02 P01 | 4 | 1 tasks | 3 files |
 | Phase 03 P01 | 5min | 2 tasks | 3 files |
+| Phase 03 P02 | 8min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -63,6 +64,9 @@ Plan: 2 of 2
 | CSV flattens multi-ID pages to one row per ID (D-01) | Same page appears in multiple rows when it has multiple IDs | Phase 3 | Complete |
 | JSON nested {filename: {page: [ids]}} (D-04) | Empty arrays for no-ID pages; natural for browsing by file | Phase 3 | Complete |
 | Both CSV and JSON always generated (D-05) | Both are lightweight to produce, no flags needed | Phase 3 | Complete |
+| Default workers = cpu_count()-1 with --workers override (D-06) | Leaves one core free for OS/tqdm; user can tune for their hardware | Phase 3 | Complete |
+| Process recycling with maxtasksperchild=50 (D-07) | Prevents Tesseract memory leak accumulation over 30K+ files | Phase 3 | Complete |
+| tqdm progress bar with running stats postfix (D-08/D-09) | Shows IDs found, no-ID pages, errors during batch processing | Phase 3 | Complete |
 
 ### Active TODOs
 
@@ -87,20 +91,20 @@ None currently. Research complete, roadmap approved, ready for planning.
 
 ### What Just Happened
 
-Phase 3 Plan 01 complete. Multi-ID data contract implemented: pipeline now returns all valid IDs per page as a list. CSV flattens multi-ID pages to one row per ID. JSON output added with nested {filename: {page: [ids]}} structure. 60 tests passing.
+Phase 3 Plan 02 complete. Parallel processing pipeline implemented with multiprocessing.Pool, directory-mode CLI, tqdm progress bar with running stats, and process recycling. Human-verified end-to-end. 70 tests passing. Phase 3 (Scale) is fully complete.
 
 ### What's Next
 
-Execute Phase 3 Plan 02: parallelization with multiprocessing, directory scanning, progress bars.
+Plan and execute Phase 4: Resilience (error handling, retry logic, resume capability).
 
 ### Context for Next Session
 
-- Phase 3 Plan 01 complete: multi-ID + JSON output
-- Data contract changed from 'id': str|None to 'ids': list[str]
-- 7 core functions: normalize_digits, select_most_likely_id, select_all_valid_ids, extract_id_with_rotation, process_single_pdf, write_results_csv, write_results_json
-- 60 tests in tests/test_precede_ocr.py (all passing)
-- process_single_pdf() is self-contained worker ready for parallelization
-- Plan 01 SUMMARY: `.planning/phases/03-scale-parallel-processing/03-01-SUMMARY.md`
+- Phase 3 complete: multi-ID extraction + JSON output + parallel processing
+- 10 core functions: normalize_digits, select_most_likely_id, select_all_valid_ids, extract_id_with_rotation, process_single_pdf, process_single_pdf_wrapper, process_all_pdfs, discover_pdfs, write_results_csv, write_results_json, main
+- CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N --debug`
+- 70 tests in tests/test_precede_ocr.py (all passing)
+- Error dict pattern in wrapper provides foundation for Phase 4 error handling
+- Plan 02 SUMMARY: `.planning/phases/03-scale-parallel-processing/03-02-SUMMARY.md`
 
 ---
 *This file is updated by transition workflows and serves as project memory.*

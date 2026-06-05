@@ -34,7 +34,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Progress
 
-- [ ] **PROG-01**: Processing progress is displayed (file count and/or percentage complete)
+- [x] **PROG-01**: Processing progress is displayed (file count and/or percentage complete)
 
 ## v2 Requirements
 
@@ -87,7 +87,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | QUAL-02 | Phase 5 | Pending |
 | QUAL-03 | Phase 4 | Pending |
 | RESL-01 | Phase 4 | Pending |
-| PROG-01 | Phase 3 | Pending |
+| PROG-01 | Phase 3 | Complete |
 
 **Coverage:**
 - v1 requirements: 14 total
