@@ -35,7 +35,7 @@ Plans:
 - [x] 01-02-PLAN.md — Create test infrastructure and validate with real PDF
 
 ### Phase 2: Rotation Handling — Multi-Angle OCR
-**Goal**: Correctly extract IDs from pages at any rotation (0/90/180/270 degrees) by trying all angles.
+**Goal**: Optimize rotation strategy to eliminate false positives by prioritizing 90-degree rotation, add debug diagnostics, failure classification in CSV notes column, and rotation distribution summary.
 **Depends on**: Phase 1
 **Requirements**: PIPE-03
 **Success Criteria** (what must be TRUE):
@@ -43,7 +43,9 @@ Plans:
   2. The tool tries all 4 rotations and returns the first valid ID match
   3. Detected rotation angle is tracked in output (CSV includes rotation_detected column)
   4. OCR completes successfully regardless of page orientation
-**Plans**: TBD
+**Plans:** 1 plan
+Plans:
+- [ ] 02-01-PLAN.md — Implement rotation reorder, debug flag, failure classification, notes column, and rotation summary
 
 ### Phase 3: Scale — Parallel Processing
 **Goal**: Process 30K+ PDFs efficiently using parallel workers with progress visibility.
@@ -84,7 +86,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation | 2/2 | Complete | 2026-06-04 |
-| 2. Rotation Handling | 0/0 | Not started | - |
+| 2. Rotation Handling | 0/1 | Planning complete | - |
 | 3. Scale | 0/0 | Not started | - |
 | 4. Resilience | 0/0 | Not started | - |
 | 5. Quality | 0/0 | Not started | - |
@@ -123,4 +125,4 @@ Research identified 5 critical Windows-specific pitfalls that must be addressed 
 5. Phase 5 adds preprocessing as optional fallback after measuring baseline accuracy
 
 ---
-*Last updated: 2026-06-04*
+*Last updated: 2026-06-05*
