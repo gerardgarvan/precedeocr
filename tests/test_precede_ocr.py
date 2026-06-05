@@ -16,6 +16,9 @@ from precede_ocr import (
     write_results_json,
     classify_failure_reason,
     print_rotation_summary,
+    discover_pdfs,
+    process_single_pdf_wrapper,
+    process_all_pdfs,
 )
 
 
@@ -497,3 +500,105 @@ class TestPrintRotationSummary:
         captured = capsys.readouterr()
         output = captured.out
         assert 'No match' in output or 'None' in output
+
+
+# -- discover_pdfs tests --
+
+class TestDiscoverPdfs:
+    def test_single_file(self, temp_dir):
+        pdf_file = Path(temp_dir) / "test.pdf"
+        pdf_file.touch()
+        result = discover_pdfs(str(pdf_file))
+        assert result == [pdf_file]
+
+    def test_directory_recursive(self, temp_dir):
+        # Create nested PDF files
+        (Path(temp_dir) / "a.pdf").touch()
+        (Path(temp_dir) / "sub").mkdir()
+        (Path(temp_dir) / "sub" / "b.pdf").touch()
+        result = discover_pdfs(temp_dir)
+        assert len(result) == 2
+        names = [p.name for p in result]
+        assert 'a.pdf' in names
+        assert 'b.pdf' in names
+
+    def test_nonexistent_path_raises(self):
+        with pytest.raises(FileNotFoundError):
+            discover_pdfs("C:/nonexistent/path/nowhere")
+
+    def test_non_pdf_file_raises(self, temp_dir):
+        txt_file = Path(temp_dir) / "file.txt"
+        txt_file.touch()
+        with pytest.raises(ValueError):
+            discover_pdfs(str(txt_file))
+
+    def test_empty_directory(self, temp_dir):
+        result = discover_pdfs(temp_dir)
+        assert result == []
+
+    def test_ignores_non_pdf_files(self, temp_dir):
+        (Path(temp_dir) / "a.pdf").touch()
+        (Path(temp_dir) / "b.txt").touch()
+        (Path(temp_dir) / "c.doc").touch()
+        result = discover_pdfs(temp_dir)
+        assert len(result) == 1
+        assert result[0].name == 'a.pdf'
+
+
+# -- process_single_pdf_wrapper tests --
+
+class TestProcessSinglePdfWrapper:
+    def test_returns_list_of_dicts(self, temp_dir):
+        """Wrapper returns results from process_single_pdf."""
+        mock_results = [{'filename': 'test.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': ''}]
+        with patch('precede_ocr.process_single_pdf', return_value=mock_results):
+            result = process_single_pdf_wrapper(Path(temp_dir) / "test.pdf")
+        assert result == mock_results
+
+    def test_handles_exception_gracefully(self):
+        """Wrapper catches exceptions and returns error dict."""
+        with patch('precede_ocr.process_single_pdf', side_effect=RuntimeError("corrupt PDF")):
+            result = process_single_pdf_wrapper(Path("bad.pdf"))
+        assert len(result) == 1
+        assert result[0]['ids'] == []
+        assert 'error:' in result[0]['notes'] or 'error' in result[0]['notes']
+        assert 'RuntimeError' in result[0]['notes']
+
+
+# -- process_all_pdfs tests --
+
+class TestProcessAllPdfs:
+    def test_returns_combined_results(self, temp_dir):
+        """process_all_pdfs aggregates results from multiple files."""
+        mock_result_a = [{'filename': 'a.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': ''}]
+        mock_result_b = [{'filename': 'b.pdf', 'page': 1, 'ids': ['67890'], 'rotation_detected': 90, 'notes': ''}]
+
+        def mock_wrapper(path):
+            if 'a.pdf' in str(path):
+                return mock_result_a
+            return mock_result_b
+
+        pdf_paths = [Path(temp_dir) / "a.pdf", Path(temp_dir) / "b.pdf"]
+
+        with patch('precede_ocr.process_single_pdf_wrapper', side_effect=mock_wrapper):
+            # Use workers=1 to avoid multiprocessing complexity in tests
+            results = process_all_pdfs(pdf_paths, workers=1)
+
+        assert len(results) == 2
+        filenames = [r['filename'] for r in results]
+        assert 'a.pdf' in filenames
+        assert 'b.pdf' in filenames
+
+    def test_pool_uses_maxtasksperchild(self):
+        """Verify process recycling per D-07."""
+        pdf_paths = [Path("test.pdf")]
+        with patch('precede_ocr.mp.Pool') as mock_pool_class:
+            mock_pool = MagicMock()
+            mock_pool.__enter__ = MagicMock(return_value=mock_pool)
+            mock_pool.__exit__ = MagicMock(return_value=False)
+            mock_pool.imap_unordered.return_value = iter([
+                [{'filename': 'test.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': ''}]
+            ])
+            mock_pool_class.return_value = mock_pool
+            process_all_pdfs(pdf_paths, workers=2)
+            mock_pool_class.assert_called_once_with(processes=2, maxtasksperchild=50)
