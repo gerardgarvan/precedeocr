@@ -77,7 +77,7 @@ Plans:
 - [x] 04-02-PLAN.md — Wire resilience into pipeline: checkpoint in process loop, resume in main, --fresh flag, stats output
 
 ### Phase 5: Quality — Conditional Preprocessing & Validation
-**Goal**: Improve extraction rate on low-quality scans without degrading high-quality results.
+**Goal**: Improve extraction rate on low-quality scans without degrading high-quality results, with post-hoc sequential ID validation to flag probable false positives.
 **Depends on**: Phase 4
 **Requirements**: QUAL-01, QUAL-02
 **Success Criteria** (what must be TRUE):
@@ -85,7 +85,10 @@ Plans:
   2. Common OCR digit confusion (O/0, I/1, S/5) is normalized before regex matching
   3. Preprocessing is applied conditionally only when initial OCR finds no ID
   4. User can identify which extractions used preprocessing vs. direct OCR
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 05-01-PLAN.md — Conditional preprocessing fallback: install OpenCV, add preprocess_image(), wire into extract_id_with_rotation()
+- [ ] 05-02-PLAN.md — Sequential ID validation: add validate_sequence() with linear regression + MAD outlier detection, wire into main()
 
 ## Progress
 
@@ -95,7 +98,7 @@ Plans:
 | 2. Rotation Handling | 1/1 | Complete | 2026-06-05 |
 | 3. Scale | 2/2 | Complete   | 2026-06-05 |
 | 4. Resilience | 2/2 | Complete   | 2026-06-05 |
-| 5. Quality | 0/0 | Not started | - |
+| 5. Quality | 0/2 | Planned | - |
 
 ## Dependencies
 
