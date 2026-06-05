@@ -14,7 +14,7 @@ Reliably extract every Precede ID from every page across 30K+ PDFs so the user c
 - [x] **Phase 1: Foundation** - Single-file OCR pipeline that extracts IDs from one PDF
 - [x] **Phase 2: Rotation Handling** - Multi-angle OCR for rotated IDs (0/90/180/270 degrees)
 - [x] **Phase 3: Scale** - Parallel processing for 30K+ PDFs with progress tracking (completed 2026-06-05)
-- [ ] **Phase 4: Resilience** - Error handling, retry logic, and resume capability
+- [x] **Phase 4: Resilience** - Error handling, retry logic, and resume capability (completed 2026-06-05)
 - [ ] **Phase 5: Quality** - Conditional preprocessing and character normalization
 
 ## Phase Details
@@ -71,10 +71,10 @@ Plans:
   2. A single failed PDF does not crash the entire batch
   3. Failed files are logged with error details for investigation
   4. User can review batch statistics (total files, successful, failed, IDs found)
-**Plans:** 2 plans
+**Plans:** 2/2 plans complete
 Plans:
 - [x] 04-01-PLAN.md — Resilience utility functions: retry decorator, error logging, checkpoint save/load, batch stats
-- [ ] 04-02-PLAN.md — Wire resilience into pipeline: checkpoint in process loop, resume in main, --fresh flag, stats output
+- [x] 04-02-PLAN.md — Wire resilience into pipeline: checkpoint in process loop, resume in main, --fresh flag, stats output
 
 ### Phase 5: Quality — Conditional Preprocessing & Validation
 **Goal**: Improve extraction rate on low-quality scans without degrading high-quality results.
@@ -94,7 +94,7 @@ Plans:
 | 1. Foundation | 2/2 | Complete | 2026-06-04 |
 | 2. Rotation Handling | 1/1 | Complete | 2026-06-05 |
 | 3. Scale | 2/2 | Complete   | 2026-06-05 |
-| 4. Resilience | 0/2 | Planning complete | - |
+| 4. Resilience | 2/2 | Complete   | 2026-06-05 |
 | 5. Quality | 0/0 | Not started | - |
 
 ## Dependencies

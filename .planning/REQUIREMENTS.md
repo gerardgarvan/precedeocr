@@ -30,7 +30,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Resilience
 
-- [ ] **RESL-01**: Processing can resume from a checkpoint file after a crash or interruption
+- [x] **RESL-01**: Processing can resume from a checkpoint file after a crash or interruption
 
 ### Progress
 
@@ -86,7 +86,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | QUAL-01 | Phase 5 | Pending |
 | QUAL-02 | Phase 5 | Pending |
 | QUAL-03 | Phase 4 | Complete |
-| RESL-01 | Phase 4 | Pending |
+| RESL-01 | Phase 4 | Complete |
 | PROG-01 | Phase 3 | Complete |
 
 **Coverage:**

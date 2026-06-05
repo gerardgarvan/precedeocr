@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: Ready to execute
-last_updated: "2026-06-05T17:00:51.688Z"
+status: Phase complete — ready for verification
+last_updated: "2026-06-05T18:05:05.373Z"
 progress:
   total_phases: 5
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 7
-  completed_plans: 6
+  completed_plans: 7
 ---
 
 # Project State: Precede OCR
@@ -20,14 +20,14 @@ progress:
 
 **Core Value**: Reliably extract every Precede ID from every page across 30K+ PDFs so the user can look up which file and page any given ID lives in.
 
-**Current Focus**: Phase 3 complete. Ready for Phase 4.
+**Current Focus**: Phase 4 complete. Ready for Phase 5.
 
 ## Current Position
 
-Phase: 04 (resilience-error-handling-checkpointing) — EXECUTING
+Phase: 04 (resilience-error-handling-checkpointing) — COMPLETE
 Plan: 2 of 2
-**Status**: Phase 3 complete. Ready to plan Phase 4 (Resilience).
-**Progress**: `[██████████] 100%` (5/5 plans complete)
+**Status**: Phase 4 complete. Ready to plan Phase 5 (Quality).
+**Progress**: `[██████████] 100%` (7/7 plans complete)
 
 ## Performance Metrics
 
@@ -43,6 +43,7 @@ Plan: 2 of 2
 | Phase 03 P01 | 5min | 2 tasks | 3 files |
 | Phase 03 P02 | 8min | 2 tasks | 2 files |
 | Phase 04 P01 | 243 | 1 tasks | 2 files |
+| Phase 04-resilience-error-handling-checkpointing P02 | 72 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -68,12 +69,19 @@ Plan: 2 of 2
 | Default workers = cpu_count()-1 with --workers override (D-06) | Leaves one core free for OS/tqdm; user can tune for their hardware | Phase 3 | Complete |
 | Process recycling with maxtasksperchild=50 (D-07) | Prevents Tesseract memory leak accumulation over 30K+ files | Phase 3 | Complete |
 | tqdm progress bar with running stats postfix (D-08/D-09) | Shows IDs found, no-ID pages, errors during batch processing | Phase 3 | Complete |
+| Atomic checkpoint writes with tempfile + os.replace | Prevents corruption on crash using atomic rename operation | Phase 4 | Complete |
+| Checkpoint frequency 50 files | Balances checkpoint overhead vs resume granularity (worst case: reprocess 49 files) | Phase 4 | Complete |
+| Module-level _ERROR_LOG_PATH for multiprocessing | Picklable on Windows spawn; main() sets before pool creation | Phase 4 | Complete |
+| Resume-aware progress bar with tqdm initial offset | Shows correct position when resuming (e.g., 1500/30000 not 0/28500) | Phase 4 | Complete |
 
 ### Active TODOs
 
 - [x] Run `/gsd:plan-phase 1` to create detailed plan for Foundation phase
 - [x] Address 5 critical Windows pitfalls identified in research from Phase 1 start
-- [ ] Plan and execute Phase 2 (Rotation Handling)
+- [x] Plan and execute Phase 2 (Rotation Handling)
+- [x] Plan and execute Phase 3 (Scale)
+- [x] Plan and execute Phase 4 (Resilience)
+- [ ] Plan and execute Phase 5 (Quality)
 
 ### Known Blockers
 
@@ -92,20 +100,21 @@ None currently. Research complete, roadmap approved, ready for planning.
 
 ### What Just Happened
 
-Phase 3 Plan 02 complete. Parallel processing pipeline implemented with multiprocessing.Pool, directory-mode CLI, tqdm progress bar with running stats, and process recycling. Human-verified end-to-end. 70 tests passing. Phase 3 (Scale) is fully complete.
+Phase 4 Plan 02 complete. Resilience primitives from Plan 01 fully integrated into processing pipeline. Checkpoint/resume functionality working end-to-end with retry-once error handling, periodic checkpoint saves every 50 files, --fresh flag for clean restart, and batch statistics reporting (console + JSON). Human-verified checkpoint resume behavior. 111 tests passing. Phase 4 (Resilience) is fully complete.
 
 ### What's Next
 
-Plan and execute Phase 4: Resilience (error handling, retry logic, resume capability).
+Plan and execute Phase 5: Quality (conditional preprocessing and character normalization for low-quality scans).
 
 ### Context for Next Session
 
-- Phase 3 complete: multi-ID extraction + JSON output + parallel processing
-- 10 core functions: normalize_digits, select_most_likely_id, select_all_valid_ids, extract_id_with_rotation, process_single_pdf, process_single_pdf_wrapper, process_all_pdfs, discover_pdfs, write_results_csv, write_results_json, main
-- CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N --debug`
-- 70 tests in tests/test_precede_ocr.py (all passing)
-- Error dict pattern in wrapper provides foundation for Phase 4 error handling
-- Plan 02 SUMMARY: `.planning/phases/03-scale-parallel-processing/03-02-SUMMARY.md`
+- Phase 4 complete: crash-safe pipeline with checkpoint/resume + retry + error logging + batch stats
+- 17 core functions including all resilience primitives: retry_once, log_error_to_file, save_checkpoint_atomic, load_checkpoint_if_exists, filter_remaining_pdfs, calculate_batch_stats, print_batch_stats
+- CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N --debug --fresh`
+- 111 tests in tests/test_precede_ocr.py (all passing)
+- Checkpoint file (.checkpoint.json) created every 50 files during batch processing
+- Batch statistics (batch_stats.json) written to output directory with resume context
+- Plan 02 SUMMARY: `.planning/phases/04-resilience-error-handling-checkpointing/04-02-SUMMARY.md`
 
 ---
 *This file is updated by transition workflows and serves as project memory.*
