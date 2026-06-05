@@ -19,6 +19,13 @@ from precede_ocr import (
     discover_pdfs,
     process_single_pdf_wrapper,
     process_all_pdfs,
+    retry_once,
+    log_error_to_file,
+    save_checkpoint_atomic,
+    load_checkpoint_if_exists,
+    filter_remaining_pdfs,
+    calculate_batch_stats,
+    print_batch_stats,
 )
 
 
@@ -603,3 +610,428 @@ class TestProcessAllPdfs:
             mock_pool_class.return_value = mock_pool
             process_all_pdfs(pdf_paths, workers=2)
             mock_pool_class.assert_called_once_with(processes=2, maxtasksperchild=50)
+
+
+# -- retry_once tests --
+
+class TestRetryOnce:
+    def test_success_on_first_call(self):
+        """Decorated function that succeeds on first call returns result normally."""
+        calls = [0]
+
+        @retry_once
+        def func():
+            calls[0] += 1
+            return "ok"
+
+        result = func()
+        assert result == "ok"
+        assert calls[0] == 1
+
+    def test_retry_then_success(self):
+        """Decorated function that fails first call, succeeds second call returns result."""
+        calls = [0]
+
+        @retry_once
+        def func():
+            calls[0] += 1
+            if calls[0] == 1:
+                raise ValueError("first attempt")
+            return "ok"
+
+        result = func()
+        assert result == "ok"
+        assert calls[0] == 2
+
+    def test_double_failure_raises_second_exception(self):
+        """Decorated function that fails both calls raises the SECOND exception."""
+        calls = [0]
+
+        @retry_once
+        def func():
+            calls[0] += 1
+            if calls[0] == 1:
+                raise ValueError("first")
+            raise RuntimeError("second")
+
+        with pytest.raises(RuntimeError) as exc_info:
+            func()
+        assert "second" in str(exc_info.value)
+
+    def test_max_two_calls(self):
+        """Decorated function is called at most 2 times total."""
+        calls = [0]
+
+        @retry_once
+        def func():
+            calls[0] += 1
+            raise RuntimeError("always fails")
+
+        with pytest.raises(RuntimeError):
+            func()
+        assert calls[0] == 2
+
+
+# -- log_error_to_file tests --
+
+class TestLogErrorToFile:
+    def test_writes_entry_with_correct_format(self, temp_dir):
+        """Writes entry to new file with format '[ISO_TIMESTAMP] filename.pdf | ErrorType: message\\n'."""
+        error_log_path = Path(temp_dir) / "errors.log"
+        log_error_to_file("test.pdf", ValueError("bad input"), error_log_path)
+
+        assert error_log_path.is_file()
+        content = error_log_path.read_text()
+        assert "[" in content
+        assert "test.pdf" in content
+        assert "ValueError" in content
+        assert "bad input" in content
+
+    def test_appends_to_existing_file(self, temp_dir):
+        """Appends to existing file (does not overwrite previous entries)."""
+        error_log_path = Path(temp_dir) / "errors.log"
+        log_error_to_file("file1.pdf", ValueError("error1"), error_log_path)
+        log_error_to_file("file2.pdf", TypeError("error2"), error_log_path)
+
+        lines = error_log_path.read_text().strip().split("\n")
+        assert len(lines) == 2
+        assert "file1.pdf" in lines[0]
+        assert "file2.pdf" in lines[1]
+
+    def test_creates_parent_directory(self, temp_dir):
+        """Creates parent directory if it does not exist."""
+        error_log_path = Path(temp_dir) / "subdir" / "errors.log"
+        log_error_to_file("test.pdf", ValueError("error"), error_log_path)
+
+        assert error_log_path.is_file()
+        assert error_log_path.parent.is_dir()
+
+
+# -- save_checkpoint_atomic tests --
+
+class TestSaveCheckpointAtomic:
+    def test_creates_valid_json_file(self, temp_dir):
+        """Creates valid JSON file at checkpoint_path with keys 'metadata', 'results', 'processed_files'."""
+        checkpoint_path = Path(temp_dir) / ".checkpoint.json"
+        results = [{"filename": "a.pdf", "page": 1, "ids": ["12345"], "rotation_detected": 90, "notes": ""}]
+        processed_files = {"a.pdf"}
+
+        save_checkpoint_atomic(results, processed_files, "/input/dir", checkpoint_path, 50)
+
+        assert checkpoint_path.is_file()
+        with open(checkpoint_path) as f:
+            data = json.load(f)
+        assert "metadata" in data
+        assert "results" in data
+        assert "processed_files" in data
+
+    def test_metadata_contains_required_fields(self, temp_dir):
+        """Metadata contains version '1.0', input_path, processed_count, timestamp, checkpoint_frequency."""
+        checkpoint_path = Path(temp_dir) / ".checkpoint.json"
+        results = [{"filename": "a.pdf", "page": 1, "ids": ["12345"], "rotation_detected": 90, "notes": ""}]
+        processed_files = {"a.pdf"}
+
+        save_checkpoint_atomic(results, processed_files, "/input/dir", checkpoint_path, 50)
+
+        with open(checkpoint_path) as f:
+            data = json.load(f)
+
+        assert data["metadata"]["version"] == "1.0"
+        assert data["metadata"]["input_path"] == "/input/dir"
+        assert data["metadata"]["processed_count"] == 1
+        assert data["metadata"]["checkpoint_frequency"] == 50
+        assert "timestamp" in data["metadata"]
+
+    def test_overwrites_existing_checkpoint(self, temp_dir):
+        """If checkpoint_path already exists, it is overwritten atomically."""
+        checkpoint_path = Path(temp_dir) / ".checkpoint.json"
+
+        # First checkpoint
+        results1 = [{"filename": "a.pdf", "page": 1, "ids": ["12345"], "rotation_detected": 90, "notes": ""}]
+        save_checkpoint_atomic(results1, {"a.pdf"}, "/input", checkpoint_path, 50)
+
+        # Second checkpoint
+        results2 = [{"filename": "b.pdf", "page": 1, "ids": ["67890"], "rotation_detected": 90, "notes": ""}]
+        save_checkpoint_atomic(results2, {"b.pdf"}, "/input", checkpoint_path, 50)
+
+        with open(checkpoint_path) as f:
+            data = json.load(f)
+
+        # Verify second data is present
+        assert data["results"][0]["filename"] == "b.pdf"
+        assert data["processed_files"] == ["b.pdf"]
+
+    def test_no_tmp_files_left_behind(self, temp_dir):
+        """No .tmp files left behind after successful write."""
+        checkpoint_path = Path(temp_dir) / ".checkpoint.json"
+        results = [{"filename": "a.pdf", "page": 1, "ids": ["12345"], "rotation_detected": 90, "notes": ""}]
+        processed_files = {"a.pdf"}
+
+        save_checkpoint_atomic(results, processed_files, "/input", checkpoint_path, 50)
+
+        # Check for temp files
+        tmp_files = list(Path(temp_dir).glob("*.tmp"))
+        assert len(tmp_files) == 0
+
+
+# -- load_checkpoint_if_exists tests --
+
+class TestLoadCheckpointIfExists:
+    def test_returns_none_when_no_checkpoint_file(self, temp_dir):
+        """Returns None when no checkpoint file exists."""
+        result = load_checkpoint_if_exists(Path(temp_dir), "/input")
+        assert result is None
+
+    def test_returns_tuple_when_valid_checkpoint(self, temp_dir, capsys):
+        """Returns (results_list, processed_files_set) when valid checkpoint exists."""
+        checkpoint_path = Path(temp_dir) / ".checkpoint.json"
+        checkpoint_data = {
+            "metadata": {
+                "version": "1.0",
+                "input_path": "/input",
+                "processed_count": 1,
+                "timestamp": "2026-06-05T10:00:00Z",
+                "checkpoint_frequency": 50
+            },
+            "results": [{"filename": "a.pdf", "page": 1, "ids": ["12345"], "rotation_detected": 90, "notes": ""}],
+            "processed_files": ["a.pdf"]
+        }
+        with open(checkpoint_path, 'w') as f:
+            json.dump(checkpoint_data, f)
+
+        result = load_checkpoint_if_exists(Path(temp_dir), "/input")
+
+        assert result is not None
+        results, processed_files = result
+        assert isinstance(results, list)
+        assert isinstance(processed_files, set)
+        assert len(results) == 1
+        assert "a.pdf" in processed_files
+
+    def test_prints_resume_message(self, temp_dir, capsys):
+        """Prints 'Resuming from checkpoint: N files already processed' (captured stdout)."""
+        checkpoint_path = Path(temp_dir) / ".checkpoint.json"
+        checkpoint_data = {
+            "metadata": {
+                "version": "1.0",
+                "input_path": "/input",
+                "processed_count": 1,
+                "timestamp": "2026-06-05T10:00:00Z",
+                "checkpoint_frequency": 50
+            },
+            "results": [],
+            "processed_files": ["a.pdf"]
+        }
+        with open(checkpoint_path, 'w') as f:
+            json.dump(checkpoint_data, f)
+
+        load_checkpoint_if_exists(Path(temp_dir), "/input")
+
+        captured = capsys.readouterr()
+        assert "Resuming from checkpoint" in captured.out
+        assert "1 files already processed" in captured.out
+
+    def test_prints_warning_when_input_path_differs(self, temp_dir, capsys):
+        """Prints WARNING when checkpoint input_path differs from current input_path."""
+        checkpoint_path = Path(temp_dir) / ".checkpoint.json"
+        checkpoint_data = {
+            "metadata": {
+                "version": "1.0",
+                "input_path": "/old/path",
+                "processed_count": 1,
+                "timestamp": "2026-06-05T10:00:00Z",
+                "checkpoint_frequency": 50
+            },
+            "results": [],
+            "processed_files": ["a.pdf"]
+        }
+        with open(checkpoint_path, 'w') as f:
+            json.dump(checkpoint_data, f)
+
+        load_checkpoint_if_exists(Path(temp_dir), "/new/path")
+
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.out
+
+    def test_returns_none_and_deletes_on_corrupt_json(self, temp_dir):
+        """Returns None and deletes file when checkpoint is corrupt JSON."""
+        checkpoint_path = Path(temp_dir) / ".checkpoint.json"
+        checkpoint_path.write_text("{{invalid json")
+
+        result = load_checkpoint_if_exists(Path(temp_dir), "/input")
+
+        assert result is None
+        assert not checkpoint_path.exists()
+
+    def test_returns_none_and_deletes_on_missing_keys(self, temp_dir):
+        """Returns None and deletes file when checkpoint is missing required keys."""
+        checkpoint_path = Path(temp_dir) / ".checkpoint.json"
+        checkpoint_data = {"metadata": {}}  # Missing results and processed_files
+        with open(checkpoint_path, 'w') as f:
+            json.dump(checkpoint_data, f)
+
+        result = load_checkpoint_if_exists(Path(temp_dir), "/input")
+
+        assert result is None
+        assert not checkpoint_path.exists()
+
+
+# -- filter_remaining_pdfs tests --
+
+class TestFilterRemainingPdfs:
+    def test_removes_processed_paths(self):
+        """Removes paths whose .name is in processed_files set."""
+        paths = [Path("a.pdf"), Path("b.pdf"), Path("c.pdf")]
+        processed = {"a.pdf", "c.pdf"}
+
+        result = filter_remaining_pdfs(paths, processed)
+
+        assert result == [Path("b.pdf")]
+
+    def test_keeps_unprocessed_paths(self):
+        """Keeps paths whose .name is NOT in processed_files set."""
+        paths = [Path("a.pdf"), Path("b.pdf"), Path("c.pdf")]
+        processed = {"a.pdf"}
+
+        result = filter_remaining_pdfs(paths, processed)
+
+        assert Path("b.pdf") in result
+        assert Path("c.pdf") in result
+        assert len(result) == 2
+
+    def test_returns_empty_when_all_processed(self):
+        """Returns empty list when all files already processed."""
+        paths = [Path("a.pdf"), Path("b.pdf"), Path("c.pdf")]
+        processed = {"a.pdf", "b.pdf", "c.pdf"}
+
+        result = filter_remaining_pdfs(paths, processed)
+
+        assert result == []
+
+
+# -- calculate_batch_stats tests --
+
+class TestCalculateBatchStats:
+    def test_returns_dict_with_required_keys(self):
+        """Returns dict with 'summary', 'performance', 'resume_context' keys."""
+        import time
+        results = [{'filename': 'a.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': ''}]
+
+        stats = calculate_batch_stats(results, checkpointed_count=0, newly_processed_count=1, start_time=time.time()-1.0)
+
+        assert "summary" in stats
+        assert "performance" in stats
+        assert "resume_context" in stats
+
+    def test_summary_total_files_counts_unique_filenames(self):
+        """summary.total_files counts unique filenames."""
+        import time
+        results = [
+            {'filename': 'a.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': ''},
+            {'filename': 'a.pdf', 'page': 2, 'ids': [], 'rotation_detected': None, 'notes': 'no_match'},
+            {'filename': 'b.pdf', 'page': 1, 'ids': [], 'rotation_detected': None, 'notes': 'error: ValueError: corrupt'}
+        ]
+
+        stats = calculate_batch_stats(results, checkpointed_count=0, newly_processed_count=2, start_time=time.time()-1.0)
+
+        assert stats["summary"]["total_files"] == 2  # a.pdf, b.pdf
+
+    def test_summary_ids_found_sums_ids(self):
+        """summary.ids_found sums len(r['ids']) across all results."""
+        import time
+        results = [
+            {'filename': 'a.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': ''},
+            {'filename': 'a.pdf', 'page': 2, 'ids': ['67890', '11234'], 'rotation_detected': 90, 'notes': ''},
+        ]
+
+        stats = calculate_batch_stats(results, checkpointed_count=0, newly_processed_count=1, start_time=time.time()-1.0)
+
+        assert stats["summary"]["ids_found"] == 3  # 1 + 2
+
+    def test_summary_failed_counts_error_results(self):
+        """summary.failed counts results with page==0 and 'error:' in notes."""
+        import time
+        results = [
+            {'filename': 'a.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': ''},
+            {'filename': 'b.pdf', 'page': 0, 'ids': [], 'rotation_detected': None, 'notes': 'error: ValueError: corrupt'}
+        ]
+
+        stats = calculate_batch_stats(results, checkpointed_count=0, newly_processed_count=2, start_time=time.time()-1.0)
+
+        assert stats["summary"]["failed"] == 1
+
+    def test_summary_no_id_pages_counts_non_error_empty_ids(self):
+        """summary.no_id_pages counts non-error results with empty ids."""
+        import time
+        results = [
+            {'filename': 'a.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': ''},
+            {'filename': 'a.pdf', 'page': 2, 'ids': [], 'rotation_detected': None, 'notes': 'no_match_any_rotation'}
+        ]
+
+        stats = calculate_batch_stats(results, checkpointed_count=0, newly_processed_count=1, start_time=time.time()-1.0)
+
+        assert stats["summary"]["no_id_pages"] == 1
+
+    def test_performance_files_per_second_calculated(self):
+        """performance.files_per_second = newly_processed_count / duration."""
+        import time
+        results = []
+        start_time = time.time() - 10.0
+
+        stats = calculate_batch_stats(results, checkpointed_count=0, newly_processed_count=2, start_time=start_time)
+
+        assert isinstance(stats["performance"]["files_per_second"], float)
+        assert stats["performance"]["files_per_second"] > 0
+
+    def test_resume_context_tracks_counts(self):
+        """resume_context.previously_checkpointed = checkpointed_count param."""
+        import time
+        results = []
+
+        stats = calculate_batch_stats(results, checkpointed_count=5, newly_processed_count=2, start_time=time.time()-1.0)
+
+        assert stats["resume_context"]["previously_checkpointed"] == 5
+        assert stats["resume_context"]["newly_processed"] == 2
+
+
+# -- print_batch_stats tests --
+
+class TestPrintBatchStats:
+    def test_prints_summary_header(self, capsys):
+        """Prints 'BATCH PROCESSING SUMMARY' header."""
+        stats = {
+            "summary": {"total_files": 1, "successful": 1, "failed": 0, "total_pages": 1, "ids_found": 1, "no_id_pages": 0, "error_count": 0},
+            "performance": {"wall_clock_duration_sec": 1.0, "files_per_second": 1.0},
+            "resume_context": {"previously_checkpointed": 0, "newly_processed": 1}
+        }
+
+        print_batch_stats(stats)
+
+        captured = capsys.readouterr()
+        assert "BATCH PROCESSING SUMMARY" in captured.out
+
+    def test_prints_resume_section_when_checkpointed(self, capsys):
+        """Prints 'Resumed from checkpoint:' line when previously_checkpointed > 0."""
+        stats = {
+            "summary": {"total_files": 1, "successful": 1, "failed": 0, "total_pages": 1, "ids_found": 1, "no_id_pages": 0, "error_count": 0},
+            "performance": {"wall_clock_duration_sec": 1.0, "files_per_second": 1.0},
+            "resume_context": {"previously_checkpointed": 10, "newly_processed": 1}
+        }
+
+        print_batch_stats(stats)
+
+        captured = capsys.readouterr()
+        assert "Resumed from checkpoint" in captured.out
+
+    def test_does_not_print_resume_when_no_checkpoint(self, capsys):
+        """Does NOT print resume section when previously_checkpointed == 0."""
+        stats = {
+            "summary": {"total_files": 1, "successful": 1, "failed": 0, "total_pages": 1, "ids_found": 1, "no_id_pages": 0, "error_count": 0},
+            "performance": {"wall_clock_duration_sec": 1.0, "files_per_second": 1.0},
+            "resume_context": {"previously_checkpointed": 0, "newly_processed": 1}
+        }
+
+        print_batch_stats(stats)
+
+        captured = capsys.readouterr()
+        assert "Resumed from checkpoint" not in captured.out

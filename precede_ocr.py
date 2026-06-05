@@ -12,9 +12,13 @@ import json
 import argparse
 import shutil
 import tempfile
+import os
+import time as time_module
 import multiprocessing as mp
 from pathlib import Path
 from collections import defaultdict
+from datetime import datetime
+from functools import wraps
 from PIL import Image
 from tqdm import tqdm
 import pytesseract
@@ -447,6 +451,142 @@ def discover_pdfs(input_path: str) -> list[Path]:
         return sorted(path.glob('**/*.pdf'))
     else:
         raise FileNotFoundError(f"Path not found: {input_path}")
+
+
+def retry_once(func):
+    """Retry function once on any exception per D-11."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception:
+            time_module.sleep(0.5)
+            return func(*args, **kwargs)
+    return wrapper
+
+
+def log_error_to_file(filename: str, error: Exception, error_log_path: Path) -> None:
+    """Append error entry to errors.log per D-09."""
+    timestamp = datetime.now().isoformat()
+    error_type = type(error).__name__
+    error_msg = str(error)
+    log_entry = f"[{timestamp}] {filename} | {error_type}: {error_msg}\n"
+    error_log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(error_log_path, 'a') as f:
+        f.write(log_entry)
+
+
+def save_checkpoint_atomic(results: list[dict], processed_files: set[str],
+                           input_path: str, checkpoint_path: Path,
+                           checkpoint_frequency: int) -> None:
+    """Atomically save checkpoint JSON per D-01, D-02, D-03."""
+    checkpoint_data = {
+        "metadata": {
+            "version": "1.0",
+            "input_path": input_path,
+            "processed_count": len(processed_files),
+            "timestamp": datetime.now().isoformat(),
+            "checkpoint_frequency": checkpoint_frequency
+        },
+        "results": results,
+        "processed_files": list(processed_files)
+    }
+    checkpoint_path = Path(checkpoint_path)
+    temp_dir = checkpoint_path.parent
+    with tempfile.NamedTemporaryFile(
+        mode='w', dir=temp_dir, delete=False, suffix='.tmp', prefix='.checkpoint_'
+    ) as tmp_file:
+        json.dump(checkpoint_data, tmp_file, indent=2)
+        tmp_file.flush()
+        os.fsync(tmp_file.fileno())
+        tmp_path = tmp_file.name
+    os.replace(tmp_path, str(checkpoint_path))
+
+
+def load_checkpoint_if_exists(output_dir: Path, input_path: str) -> tuple[list[dict], set[str]] | None:
+    """Load checkpoint if exists per D-05, D-06, D-08."""
+    checkpoint_path = Path(output_dir) / '.checkpoint.json'
+    if not checkpoint_path.exists():
+        return None
+    try:
+        with open(checkpoint_path) as f:
+            checkpoint = json.load(f)
+        results = checkpoint['results']
+        processed_files = set(checkpoint['processed_files'])
+        metadata = checkpoint['metadata']
+        print(f"Resuming from checkpoint: {len(processed_files)} files already processed")
+        if metadata.get('input_path') != input_path:
+            print(f"WARNING: Checkpoint was created for '{metadata.get('input_path')}'")
+            print(f"         Now processing '{input_path}'")
+            print(f"         New files will be processed; removed files skipped from re-processing.")
+        return results, processed_files
+    except (json.JSONDecodeError, KeyError) as e:
+        print(f"WARNING: Corrupt checkpoint file, starting fresh: {e}")
+        checkpoint_path.unlink(missing_ok=True)
+        return None
+
+
+def filter_remaining_pdfs(pdf_paths: list[Path], processed_files: set[str]) -> list[Path]:
+    """Remove already-processed files from work queue per D-08."""
+    return [p for p in pdf_paths if p.name not in processed_files]
+
+
+def calculate_batch_stats(all_results: list[dict], checkpointed_count: int,
+                          newly_processed_count: int, start_time: float) -> dict:
+    """Calculate batch statistics per D-13, D-14."""
+    duration = time_module.time() - start_time
+    total_pages = len(all_results)
+    ids_found = sum(len(r['ids']) for r in all_results)
+    no_id_pages = sum(1 for r in all_results if not r['ids'] and 'error:' not in r.get('notes', ''))
+    error_count = sum(1 for r in all_results if r['page'] == 0 and 'error:' in r.get('notes', ''))
+    all_filenames = set(r['filename'] for r in all_results)
+    error_filenames = set(r['filename'] for r in all_results if 'error:' in r.get('notes', ''))
+    successful_files = len(all_filenames - error_filenames)
+    total_files = len(all_filenames)
+    files_per_sec = newly_processed_count / duration if duration > 0 else 0
+    return {
+        "summary": {
+            "total_files": total_files,
+            "successful": successful_files,
+            "failed": error_count,
+            "total_pages": total_pages,
+            "ids_found": ids_found,
+            "no_id_pages": no_id_pages,
+            "error_count": error_count
+        },
+        "performance": {
+            "wall_clock_duration_sec": round(duration, 2),
+            "files_per_second": round(files_per_sec, 2)
+        },
+        "resume_context": {
+            "previously_checkpointed": checkpointed_count,
+            "newly_processed": newly_processed_count
+        },
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+def print_batch_stats(stats: dict) -> None:
+    """Print summary to console per D-12."""
+    print("\n" + "=" * 60)
+    print("BATCH PROCESSING SUMMARY")
+    print("=" * 60)
+    s = stats['summary']
+    print(f"Total files:        {s['total_files']}")
+    print(f"  Successful:       {s['successful']}")
+    print(f"  Failed:           {s['failed']}")
+    print(f"Total pages:        {s['total_pages']}")
+    print(f"  IDs found:        {s['ids_found']}")
+    print(f"  No-ID pages:      {s['no_id_pages']}")
+    p = stats['performance']
+    print(f"\nDuration:           {p['wall_clock_duration_sec']}s")
+    print(f"Processing rate:    {p['files_per_second']:.2f} files/sec")
+    r = stats['resume_context']
+    if r['previously_checkpointed'] > 0:
+        print(f"\nResumed from checkpoint:")
+        print(f"  Previously done:  {r['previously_checkpointed']} files")
+        print(f"  Newly processed:  {r['newly_processed']} files")
+    print("=" * 60)
 
 
 def process_single_pdf_wrapper(pdf_path: Path) -> list[dict]:
