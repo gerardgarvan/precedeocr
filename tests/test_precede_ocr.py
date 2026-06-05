@@ -1587,3 +1587,44 @@ class TestValidateSequence:
         validate_sequence(results)
         current_notes = [r['notes'] for r in results]
         assert original_notes == current_notes
+
+
+# -- Task 2: main() integration tests --
+
+class TestMainSequenceValidation:
+    """Integration test: main() calls validate_sequence before writing output."""
+
+    def test_main_calls_validate_sequence(self, tmp_path):
+        """main() passes results through validate_sequence before writing CSV/JSON."""
+        pdf_file = tmp_path / 'test.pdf'
+        pdf_file.write_bytes(b'dummy')
+
+        # Use moderate outlier to test that validation runs
+        # With small sample size, outlier may affect nearby points (expected statistical behavior)
+        mock_results = [
+            {'filename': 'test.pdf', 'page': 1, 'ids': ['10001'], 'rotation_detected': 90, 'notes': ''},
+            {'filename': 'test.pdf', 'page': 2, 'ids': ['10002'], 'rotation_detected': 90, 'notes': ''},
+            {'filename': 'test.pdf', 'page': 3, 'ids': ['10003'], 'rotation_detected': 90, 'notes': ''},
+            {'filename': 'test.pdf', 'page': 4, 'ids': ['10004'], 'rotation_detected': 90, 'notes': ''},
+            {'filename': 'test.pdf', 'page': 5, 'ids': ['10005'], 'rotation_detected': 90, 'notes': ''},
+            {'filename': 'test.pdf', 'page': 6, 'ids': ['10500'], 'rotation_detected': 270, 'notes': ''},
+        ]
+
+        with patch('precede_ocr.discover_pdfs', return_value=[pdf_file]):
+            with patch('precede_ocr._process_single_pdf_with_retry', return_value=mock_results):
+                output_csv = tmp_path / 'results.csv'
+                main(str(tmp_path), str(output_csv))
+
+        # Read CSV and check that validation ran and flagged at least the outlier
+        import csv
+        with open(output_csv) as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+
+        # At least ONE row should have seq_outlier flag (validation ran)
+        flagged_rows = [r for r in rows if 'seq_outlier_conf_' in r['notes']]
+        assert len(flagged_rows) > 0, "validate_sequence should flag at least one outlier"
+
+        # The outlier page (6, id 10500) should be among the flagged
+        page6_row = [r for r in rows if r['page'] == '6'][0]
+        assert 'seq_outlier_conf_' in page6_row['notes'], "Outlier ID should be flagged"

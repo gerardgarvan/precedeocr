@@ -958,6 +958,8 @@ def main(input_path: str, output_csv: str, output_json: str | None = None,
                 print("All files already processed. Use --fresh to reprocess.")
                 # Still write outputs from checkpoint data
                 all_results = checkpointed_results
+                # Phase 5 D-06/D-07: Post-hoc sequential validation
+                all_results = validate_sequence(all_results)
                 write_results_csv(all_results, output_csv)
                 write_results_json(all_results, output_json)
                 print_rotation_summary(all_results)
@@ -993,6 +995,9 @@ def main(input_path: str, output_csv: str, output_json: str | None = None,
             input_path=input_path,
             checkpoint_frequency=_CHECKPOINT_FREQUENCY
         )
+
+    # Phase 5 D-06/D-07: Post-hoc sequential validation
+    all_results = validate_sequence(all_results)
 
     # Write outputs (D-04: merged checkpointed + new results)
     write_results_csv(all_results, output_csv)
