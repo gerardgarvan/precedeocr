@@ -68,29 +68,29 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| STATE-01 | — | Pending |
-| STATE-02 | — | Pending |
-| STATE-03 | — | Pending |
-| SHUT-01 | — | Pending |
-| SHUT-02 | — | Pending |
-| SHUT-03 | — | Pending |
-| SHUT-04 | — | Pending |
-| SHUT-05 | — | Pending |
-| MENU-01 | — | Pending |
-| MENU-02 | — | Pending |
-| MENU-03 | — | Pending |
-| MENU-04 | — | Pending |
-| STAT-01 | — | Pending |
-| STAT-02 | — | Pending |
-| STAT-03 | — | Pending |
-| STAT-04 | — | Pending |
-| STAT-05 | — | Pending |
+| STATE-01 | Phase 6 | Pending |
+| STATE-02 | Phase 6 | Pending |
+| STATE-03 | Phase 6 | Pending |
+| SHUT-01 | Phase 7 | Pending |
+| SHUT-02 | Phase 7 | Pending |
+| SHUT-03 | Phase 7 | Pending |
+| SHUT-04 | Phase 7 | Pending |
+| SHUT-05 | Phase 7 | Pending |
+| MENU-01 | Phase 8 | Pending |
+| MENU-02 | Phase 8 | Pending |
+| MENU-03 | Phase 8 | Pending |
+| MENU-04 | Phase 8 | Pending |
+| STAT-01 | Phase 9 | Pending |
+| STAT-02 | Phase 9 | Pending |
+| STAT-03 | Phase 9 | Pending |
+| STAT-04 | Phase 9 | Pending |
+| STAT-05 | Phase 9 | Pending |
 
 **Coverage:**
 - v1.1 requirements: 15 total
-- Mapped to phases: 0
-- Unmapped: 15
+- Mapped to phases: 15
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-06-05*
-*Last updated: 2026-06-05 after initial definition*
+*Last updated: 2026-06-05 after roadmap creation*
