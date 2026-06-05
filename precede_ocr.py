@@ -31,7 +31,10 @@ else:
     pytesseract.pytesseract.tesseract_cmd = 'tesseract'
 
 # Configure Poppler path (auto-detect common Windows locations)
-POPPLER_SEARCH_PATHS = [
+# Poppler-for-Windows often installs with versioned subdirs, e.g.
+# ~/poppler/poppler-24.08.0/Library/bin/pdftoppm.exe
+# So we search fixed paths first, then recursively search known roots.
+_POPPLER_FIXED_PATHS = [
     Path.home() / 'poppler' / 'Library' / 'bin',
     Path.home() / 'poppler' / 'bin',
     Path.home() / 'poppler',
@@ -40,10 +43,28 @@ POPPLER_SEARCH_PATHS = [
 ]
 
 POPPLER_PATH = None
-for _pop_path in POPPLER_SEARCH_PATHS:
+# First: check fixed paths
+for _pop_path in _POPPLER_FIXED_PATHS:
     if _pop_path.is_dir() and any(_pop_path.glob('pdftoppm*')):
         POPPLER_PATH = str(_pop_path)
         break
+
+# Second: recursive search in common root directories for versioned installs
+if POPPLER_PATH is None:
+    for _pop_root in [Path.home() / 'poppler', Path(r'C:\Program Files\poppler')]:
+        if _pop_root.is_dir():
+            for _match in _pop_root.rglob('pdftoppm*'):
+                POPPLER_PATH = str(_match.parent)
+                break
+        if POPPLER_PATH:
+            break
+
+if POPPLER_PATH is None:
+    print("WARNING: Could not auto-detect Poppler. Searched:")
+    for _p in _POPPLER_FIXED_PATHS:
+        print(f"  {_p} (exists={_p.is_dir()})")
+    print(f"  Recursive search in: {Path.home() / 'poppler'}")
+    print("Set POPPLER_PATH manually in precede_ocr.py or add Poppler to PATH.")
 
 
 def normalize_digits(text: str) -> str:
