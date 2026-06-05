@@ -27,6 +27,7 @@ from precede_ocr import (
     calculate_batch_stats,
     print_batch_stats,
     main,
+    preprocess_image,
 )
 import time as time_module
 
@@ -1224,3 +1225,47 @@ class TestFreshArgparse:
         # For now, just verify the flag exists by attempting to use it
         # This will be validated in the human-verify checkpoint when running actual CLI
         pass  # Covered by manual verification in checkpoint task
+
+
+# -- preprocess_image tests --
+
+class TestPreprocessImage:
+    def test_returns_pil_image(self):
+        """preprocess_image returns a PIL Image object."""
+        img = Image.new('RGB', (100, 100), color=(128, 128, 128))
+        result = preprocess_image(img)
+        assert isinstance(result, Image.Image)
+
+    def test_output_is_grayscale(self):
+        """Output image mode is 'L' (grayscale)."""
+        img = Image.new('RGB', (100, 100), color=(128, 128, 128))
+        result = preprocess_image(img)
+        assert result.mode == 'L'
+
+    def test_output_is_binary(self):
+        """Output pixels are only 0 or 255 (Otsu binarization)."""
+        img = Image.new('RGB', (100, 100), color=(128, 128, 128))
+        result = preprocess_image(img)
+        pixels = list(result.getdata())
+        unique_values = set(pixels)
+        assert unique_values.issubset({0, 255})
+
+    def test_handles_rgb_input(self):
+        """Processes 3-channel RGB image without error."""
+        img = Image.new('RGB', (200, 200), color=(100, 150, 200))
+        result = preprocess_image(img)
+        assert isinstance(result, Image.Image)
+        assert result.mode == 'L'
+
+    def test_handles_grayscale_input(self):
+        """Processes already-grayscale (mode 'L') image without error."""
+        img = Image.new('L', (200, 200), color=128)
+        result = preprocess_image(img)
+        assert isinstance(result, Image.Image)
+        assert result.mode == 'L'
+
+    def test_preserves_dimensions(self):
+        """Output image has same width and height as input."""
+        img = Image.new('RGB', (300, 400), color=(128, 128, 128))
+        result = preprocess_image(img)
+        assert result.size == (300, 400)

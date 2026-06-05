@@ -21,6 +21,8 @@ from datetime import datetime
 from functools import wraps
 from PIL import Image
 from tqdm import tqdm
+import cv2
+import numpy as np
 import pytesseract
 import pandas as pd
 from pdf2image import convert_from_path
@@ -194,6 +196,44 @@ def classify_failure_reason(ocr_texts: list[str]) -> str:
         return 'only_noise_matches'
     else:
         return 'no_match_any_rotation'
+
+
+def preprocess_image(pil_image: Image.Image) -> Image.Image:
+    """
+    Apply single-pass preprocessing for degraded scans per D-01.
+
+    Pipeline: grayscale -> Gaussian blur (denoise) -> Otsu threshold.
+    Converts PIL Image to OpenCV array, processes, converts back to PIL.
+
+    Uses COLOR_RGB2GRAY (not BGR2GRAY) because PIL images are RGB.
+    Blur BEFORE threshold (not after) to smooth noise before binarization.
+
+    Args:
+        pil_image: Original PIL Image from PDF page
+
+    Returns:
+        Preprocessed PIL Image (grayscale, denoised, binarized)
+    """
+    # Convert PIL to numpy array (OpenCV format)
+    img_array = np.array(pil_image)
+
+    # Step 1: Grayscale conversion
+    # PIL images are RGB, so use COLOR_RGB2GRAY (not BGR2GRAY per Pitfall 2)
+    if len(img_array.shape) == 3:
+        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img_array
+
+    # Step 2: Denoise with Gaussian blur (5x5 kernel, sigma=0 auto-calculated)
+    # Must blur BEFORE threshold (Pitfall 1: threshold-then-blur is wrong order)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # Step 3: Otsu's thresholding (automatic threshold determination)
+    # cv2.THRESH_BINARY: pixels > threshold -> 255 (white), else 0 (black)
+    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # Convert back to PIL Image for pytesseract compatibility
+    return Image.fromarray(binary)
 
 
 def extract_id_with_rotation(image: Image.Image, debug: bool = False) -> tuple[list[str], int | None, str]:
