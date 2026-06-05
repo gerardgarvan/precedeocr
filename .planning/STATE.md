@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: Executing Phase 01
-last_updated: "2026-06-05T02:40:27.612Z"
+status: Ready to execute
+last_updated: "2026-06-05T03:13:31.757Z"
 progress:
   total_phases: 5
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 2
-  completed_plans: 1
+  completed_plans: 2
 ---
 
 # Project State: Precede OCR
@@ -20,16 +20,14 @@ progress:
 
 **Core Value**: Reliably extract every Precede ID from every page across 30K+ PDFs so the user can look up which file and page any given ID lives in.
 
-**Current Focus**: Phase 1 - Foundation (single-file OCR pipeline)
+**Current Focus**: Phase 1 complete. Ready for Phase 2.
 
 ## Current Position
 
-Phase: 01 (foundation-single-file-ocr-pipeline) — EXECUTING
-Plan: 1 of 2
-**Phase**: Not started
-**Plan**: None
-**Status**: Roadmap created, awaiting Phase 1 planning
-**Progress**: `[░░░░░░░░░░░░░░░░░░░░] 0%` (0/5 phases complete)
+Phase: 01 (foundation-single-file-ocr-pipeline) — COMPLETE
+Plan: 2 of 2 (all plans complete)
+**Status**: Phase 1 complete. Ready to plan Phase 2.
+**Progress**: `[██████████] 100%` (1/5 phases complete, Phase 1 done)
 
 ## Performance Metrics
 
@@ -40,6 +38,7 @@ Plan: 1 of 2
 | Requirements validated | 14/14 | 0/14 | Pending |
 | Coverage | 100% | 100% | Mapped |
 | Phase 01 P01 | 4 | 2 tasks | 2 files |
+| Phase 01 P02 | 5h | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -55,11 +54,15 @@ Plan: 1 of 2
 | Tesseract explicit path on Windows | Tesseract not in PATH; configured explicit path at C:/Program Files/Tesseract-OCR/tesseract.exe | Phase 1 | Complete |
 | PSM 6 for isolated IDs | Middle ground for full-page scans with isolated IDs; PSM 7 too restrictive, PSM 3 too broad | Phase 1 | Complete |
 | Memory-safe pdf2image | output_folder + paths_only prevents OOM on multi-page PDFs | Phase 1 | Complete |
+| Auto-detect Tesseract/Poppler paths | Search common Windows install locations instead of hardcoding | Phase 1 | Complete |
+| Recursive Poppler search | Handle versioned subdirectory installs (poppler-24.08.0/Library/bin) | Phase 1 | Complete |
+| Baseline OCR accuracy 94.9% | 37/39 IDs from 39-page test PDF; acceptable for foundation | Phase 1 | Complete |
 
 ### Active TODOs
 
-- [ ] Run `/gsd:plan-phase 1` to create detailed plan for Foundation phase
-- [ ] Address 5 critical Windows pitfalls identified in research from Phase 1 start
+- [x] Run `/gsd:plan-phase 1` to create detailed plan for Foundation phase
+- [x] Address 5 critical Windows pitfalls identified in research from Phase 1 start
+- [ ] Plan and execute Phase 2 (Rotation Handling)
 
 ### Known Blockers
 
@@ -78,21 +81,21 @@ None currently. Research complete, roadmap approved, ready for planning.
 
 ### What Just Happened
 
-Phase 1 Plan 1 completed successfully. Built complete single-file OCR pipeline with multi-rotation support, digit normalization, and CSV output. All tasks executed and committed (dd4b2b4, 70a2b93).
+Phase 1 complete. Plan 02 finished: test infrastructure created (25 unit tests, all passing) and real-PDF validation confirmed (37/39 IDs extracted from 39-page PDF). Two path-detection fixes committed during real-PDF testing (be433b7, cb258db).
 
 ### What's Next
 
-Execute Plan 2 of Phase 1 (if exists), or transition to Phase 2 for rotation optimization and tracking.
+Plan and execute Phase 2 (Rotation Handling) to optimize multi-angle OCR.
 
 ### Context for Next Session
 
-- Complete OCR pipeline implemented in precede_ocr.py
+- Phase 1 fully complete: pipeline + tests + real-PDF validation
+- Complete OCR pipeline in precede_ocr.py with auto-detected Tesseract/Poppler paths
+- 25 unit tests in tests/test_precede_ocr.py (all passing)
+- Baseline accuracy: 94.9% (37/39 IDs from 39-page test PDF)
 - All 5 core functions working: normalize_digits, select_most_likely_id, extract_id_with_rotation, process_single_pdf, write_results_csv
-- Requirements.txt pinned to pytesseract 0.3.13, pdf2image 1.17.0, Pillow 12.2.0, pandas 3.0.3
-- Tesseract configured at C:/Program Files/Tesseract-OCR/tesseract.exe
-- PSM 6 selected for OCR configuration
-- Memory-safe pdf2image with output_folder + paths_only
 - Plan 1 SUMMARY: `.planning/phases/01-foundation-single-file-ocr-pipeline/01-01-SUMMARY.md`
+- Plan 2 SUMMARY: `.planning/phases/01-foundation-single-file-ocr-pipeline/01-02-SUMMARY.md`
 
 ---
 *This file is updated by transition workflows and serves as project memory.*
