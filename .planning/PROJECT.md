@@ -8,39 +8,46 @@ A batch OCR pipeline that scans ~30,429 multi-page PDF files containing scanned/
 
 Reliably extract every Precede ID from every page across 30K+ PDFs so the user can look up which file and page any given ID lives in.
 
+## Current State
+
+Shipped v1.0 with 2,790 LOC Python (1,101 pipeline + 1,689 tests).
+Tech stack: Python 3, pytesseract, pdf2image/Poppler, OpenCV, Pillow, pandas, scipy.
+141 tests passing. 94.9% baseline OCR accuracy on test corpus.
+
+CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N --debug --fresh`
+
 ## Requirements
 
 ### Validated
 
-- [x] Convert each PDF page to a high-DPI image for OCR — Validated in Phase 1: Foundation
-- [x] Extract 5-digit numeric IDs from OCR output via regex — Validated in Phase 1: Foundation
-- [x] Map each ID to its source filename and page number — Validated in Phase 1: Foundation
-- [x] Output results as CSV (`filename, id, page, rotation_detected`) — Validated in Phase 1: Foundation
-- [x] Handle ~90-degree rotated text (multi-rotation OCR strategy) — Validated in Phase 2: Rotation Handling
-- [x] Recursively discover all `.pdf` files in a target directory — Validated in Phase 3: Scale
-- [x] Output results as JSON (`{filename: {page: [ids], ...}}`) — Validated in Phase 3: Scale
-- [x] Flag pages where no ID is found (not silently dropped) — Validated in Phase 3: Scale
-- [x] Handle multiple IDs per page if present — Validated in Phase 3: Scale
-- [x] Parallelize processing to handle 30,429 files efficiently — Validated in Phase 3: Scale
-- [x] Per-file error handling so a single corrupted PDF does not crash the batch — Validated in Phase 4: Resilience
-- [x] Checkpoint/resume capability to continue after crash or interruption — Validated in Phase 4: Resilience
+- ✓ Convert each PDF page to a high-DPI image (300+ DPI) for OCR — v1.0
+- ✓ Extract 5-digit numeric IDs from OCR output via regex — v1.0
+- ✓ Map each ID to its source filename and page number — v1.0
+- ✓ Output results as CSV (`filename, id, page, rotation_detected, notes`) — v1.0
+- ✓ Handle ~90-degree rotated text (multi-rotation OCR strategy) — v1.0
+- ✓ Recursively discover all `.pdf` files in a target directory — v1.0
+- ✓ Output results as JSON (`{filename: {page: [ids], ...}}`) — v1.0
+- ✓ Flag pages where no ID is found (not silently dropped) — v1.0
+- ✓ Handle multiple IDs per page if present — v1.0
+- ✓ Parallelize processing to handle 30,429 files efficiently — v1.0
+- ✓ Per-file error handling so a single corrupted PDF does not crash the batch — v1.0
+- ✓ Checkpoint/resume capability to continue after crash or interruption — v1.0
+- ✓ Preprocess low-quality scans (grayscale, threshold, denoise) as fallback — v1.0
+- ✓ Handle OCR near-misses (O/0, I/1, S/5 confusion) with normalization — v1.0
 
 ### Active
 
-(None — all v1 requirements validated)
-
-### Recently Validated
-
-- [x] Preprocess low-quality scans (grayscale, threshold, denoise) as fallback — Validated in Phase 5: Quality
-- [x] Handle OCR near-misses (O/0, I/1, S/5 confusion) with normalization — Validated in Phase 5: Quality (digit whitelist + normalize_digits)
+(None — planning next milestone)
 
 ### Out of Scope
 
 - GUI or web interface — CLI/script only, output to files
 - Search CLI tool — user will search CSV/JSON manually or via Excel
-- Cloud OCR services — using local Tesseract
-- Rewriting or modifying the source PDFs
-- Real-time/streaming processing — this is a one-shot batch job
+- Cloud OCR services — using local Tesseract, no API costs at scale
+- Rewriting or modifying the source PDFs — read-only processing
+- Real-time/streaming processing — one-shot batch job
+- Database backend — CSV/JSON is portable and sufficient
+- Custom OCR model training — Tesseract's numeric recognition is sufficient
 
 ## Context
 
@@ -48,7 +55,6 @@ Reliably extract every Precede ID from every page across 30K+ PDFs so the user c
 - Each page contains a "Precede" label in cursive font with a 5-digit numeric ID below it
 - The IDs are oriented at approximately 90 degrees from upright reading position
 - Total corpus: ~30,429 PDF files, each with multiple pages
-- The "Precede" cursive text above the ID could serve as an anchor/landmark for locating the ID region
 - Running on Windows 10 with Tesseract OCR and Poppler already installed
 
 ## Constraints
@@ -63,28 +69,16 @@ Reliably extract every Precede ID from every page across 30K+ PDFs so the user c
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Python + pytesseract + pdf2image | User's stated preference, well-suited ecosystem for OCR batch work | -- Pending |
-| Multi-rotation OCR (0/90/180/270) | IDs are rotated ~90 degrees; trying all rotations with regex validation catches orientation variations | -- Pending |
-| CSV + JSON dual output | CSV for Excel/manual inspection, JSON for programmatic lookup | -- Pending |
-| Local Tesseract (no cloud OCR) | Dependencies already installed, no API costs at scale, simpler pipeline | -- Pending |
-| Multiprocessing parallelization | 30K+ files makes serial processing impractical | -- Pending |
-
-## Evolution
-
-This document evolves at phase transitions and milestone boundaries.
-
-**After each phase transition** (via `/gsd:transition`):
-1. Requirements invalidated? -> Move to Out of Scope with reason
-2. Requirements validated? -> Move to Validated with phase reference
-3. New requirements emerged? -> Add to Active
-4. Decisions to log? -> Add to Key Decisions
-5. "What This Is" still accurate? -> Update if drifted
-
-**After each milestone** (via `/gsd:complete-milestone`):
-1. Full review of all sections
-2. Core Value check — still the right priority?
-3. Audit Out of Scope — reasons still valid?
-4. Update Context with current state
+| Python + pytesseract + pdf2image | User's stated preference, well-suited ecosystem for OCR batch work | ✓ Good — clean API, mature libraries |
+| Multi-rotation OCR (90/270/0/180) | IDs are rotated ~90 degrees; brute-force all rotations with regex validation | ✓ Good — 94.9% accuracy, simple and reliable |
+| CSV + JSON dual output | CSV for Excel/manual inspection, JSON for programmatic lookup | ✓ Good — both generated by default, minimal overhead |
+| Local Tesseract (no cloud OCR) | Dependencies already installed, no API costs at scale, simpler pipeline | ✓ Good — zero cost, no network dependency |
+| multiprocessing.Pool parallelization | 30K+ files makes serial processing impractical; cpu_count()-1 workers | ✓ Good — process recycling prevents memory leaks |
+| Atomic checkpoint writes (tempfile + os.replace) | Prevents corruption on crash | ✓ Good — crash-safe resume verified |
+| Conditional preprocessing (OpenCV fallback) | Only preprocess when initial OCR fails — avoids degrading good scans | ✓ Good — targeted improvement without side effects |
+| Theil-Sen robust regression for sequence validation | OLS too sensitive to outliers; Theil-Sen + modified Z-score more reliable | ✓ Good — corrected from initial OLS approach in Phase 5 gap closure |
+| PSM 6 for Tesseract | Middle ground for full-page scans with isolated IDs | ✓ Good — better than PSM 7 (too restrictive) or PSM 3 (too broad) |
+| Memory-safe pdf2image (output_folder + paths_only) | Prevents OOM on multi-page PDFs | ✓ Good — critical for large corpus processing |
 
 ---
-*Last updated: 2026-06-05 after Phase 5 completion — all v1 phases complete*
+*Last updated: 2026-06-05 after v1.0 milestone*
