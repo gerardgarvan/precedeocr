@@ -12,16 +12,15 @@ Reliably extract every Precede ID from every page across 30K+ PDFs so the user c
 
 ### Validated
 
-(None yet — ship to validate)
+- [x] Convert each PDF page to a high-DPI image for OCR — Validated in Phase 1: Foundation
+- [x] Extract 5-digit numeric IDs from OCR output via regex — Validated in Phase 1: Foundation
+- [x] Map each ID to its source filename and page number — Validated in Phase 1: Foundation
+- [x] Output results as CSV (`filename, id, page, rotation_detected`) — Validated in Phase 1: Foundation
+- [x] Handle ~90-degree rotated text (multi-rotation OCR strategy) — Validated in Phase 2: Rotation Handling
 
 ### Active
 
 - [ ] Recursively discover all `.pdf` files in a target directory
-- [ ] Convert each PDF page to a high-DPI image for OCR
-- [ ] Handle ~90-degree rotated text (multi-rotation OCR strategy)
-- [ ] Extract 5-digit numeric IDs from OCR output via regex
-- [ ] Map each ID to its source filename and page number
-- [ ] Output results as CSV (`filename, id, page, rotation_detected`)
 - [ ] Output results as JSON (`{filename: {page: [ids], ...}}`)
 - [ ] Flag pages where no ID is found (not silently dropped)
 - [ ] Handle multiple IDs per page if present
@@ -82,4 +81,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-04 after initialization*
+*Last updated: 2026-06-05 after Phase 2 completion*
