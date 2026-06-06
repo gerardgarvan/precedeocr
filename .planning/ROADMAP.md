@@ -31,7 +31,11 @@ This roadmap delivers campaign management for the v1.0 OCR pipeline, adding prod
 4. User can resume processing after crash and campaign state accurately reflects pre-crash progress
 5. User can verify campaign state updates are atomic (no partial writes on crash)
 
-**Plans**: TBD
+**Plans:** 2 plans
+
+Plans:
+- [ ] 06-01-PLAN.md -- CampaignState dataclass, atomic save/load, silent upgrade, folder_path utility + unit tests
+- [ ] 06-02-PLAN.md -- Wire campaign state into pipeline (main, process_all_pdfs, wrapper) + integration tests
 
 ---
 
@@ -95,7 +99,7 @@ This roadmap delivers campaign management for the v1.0 OCR pipeline, adding prod
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 6. Enhanced Campaign State Schema | 0/0 | Not started | - |
+| 6. Enhanced Campaign State Schema | 0/2 | Planning complete | - |
 | 7. Graceful Shutdown Infrastructure | 0/0 | Not started | - |
 | 8. Interactive Campaign Menu | 0/0 | Not started | - |
 | 9. Per-Folder Statistics & Reporting | 0/0 | Not started | - |
