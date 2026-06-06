@@ -15,11 +15,11 @@ Requirements for Campaign Runner milestone. Each maps to roadmap phases.
 
 ### Graceful Shutdown
 
-- [ ] **SHUT-01**: User can press Ctrl+C to gracefully stop processing (workers finish current file before exit)
-- [ ] **SHUT-02**: Workers are protected from SIGINT so they don't crash mid-OCR
-- [ ] **SHUT-03**: Pool cleanup follows safe sequence to prevent deadlocks and zombie processes
-- [ ] **SHUT-04**: tqdm progress bar closes cleanly on shutdown (no terminal corruption)
-- [ ] **SHUT-05**: Campaign state is marked "interrupted" with timestamp on Ctrl+C
+- [x] **SHUT-01**: User can press Ctrl+C to gracefully stop processing (workers finish current file before exit)
+- [x] **SHUT-02**: Workers are protected from SIGINT so they don't crash mid-OCR
+- [x] **SHUT-03**: Pool cleanup follows safe sequence to prevent deadlocks and zombie processes
+- [x] **SHUT-04**: tqdm progress bar closes cleanly on shutdown (no terminal corruption)
+- [x] **SHUT-05**: Campaign state is marked "interrupted" with timestamp on Ctrl+C
 
 ### Interactive Menu
 
@@ -71,11 +71,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STATE-01 | Phase 6 | Complete |
 | STATE-02 | Phase 6 | Complete |
 | STATE-03 | Phase 6 | Complete |
-| SHUT-01 | Phase 7 | Pending |
-| SHUT-02 | Phase 7 | Pending |
-| SHUT-03 | Phase 7 | Pending |
-| SHUT-04 | Phase 7 | Pending |
-| SHUT-05 | Phase 7 | Pending |
+| SHUT-01 | Phase 7 | Complete |
+| SHUT-02 | Phase 7 | Complete |
+| SHUT-03 | Phase 7 | Complete |
+| SHUT-04 | Phase 7 | Complete |
+| SHUT-05 | Phase 7 | Complete |
 | MENU-01 | Phase 8 | Pending |
 | MENU-02 | Phase 8 | Pending |
 | MENU-03 | Phase 8 | Pending |

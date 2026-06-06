@@ -57,7 +57,7 @@ Plans:
 **Plans:** 2 plans
 
 Plans:
-- [ ] 07-01-PLAN.md -- Shutdown tests + implementation (signal handler, worker protection, Event, pool drain, tqdm cleanup, campaign state interruption)
+- [x] 07-01-PLAN.md -- Shutdown tests + implementation (signal handler, worker protection, Event, pool drain, tqdm cleanup, campaign state interruption)
 - [ ] 07-02-PLAN.md -- Manual verification checkpoint: Ctrl+C testing on Windows 10
 
 ---
