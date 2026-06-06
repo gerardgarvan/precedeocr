@@ -536,6 +536,7 @@ def write_results_csv(results: list[dict], output_path: str) -> None:
             for id_val in r['ids']:
                 flattened.append({
                     'filename': r['filename'],
+                    'folder_path': r.get('folder_path', ''),
                     'page': r['page'],
                     'id': id_val,
                     'rotation_detected': r['rotation_detected'],
@@ -544,6 +545,7 @@ def write_results_csv(results: list[dict], output_path: str) -> None:
         else:
             flattened.append({
                 'filename': r['filename'],
+                'folder_path': r.get('folder_path', ''),
                 'page': r['page'],
                 'id': '',
                 'rotation_detected': r['rotation_detected'],
@@ -553,8 +555,8 @@ def write_results_csv(results: list[dict], output_path: str) -> None:
     # Create DataFrame
     df = pd.DataFrame(flattened)
 
-    # Enforce column order per D-12: includes notes column
-    df = df[['filename', 'page', 'id', 'rotation_detected', 'notes']]
+    # Enforce column order per D-12: includes notes column and folder_path
+    df = df[['filename', 'folder_path', 'page', 'id', 'rotation_detected', 'notes']]
 
     # Write CSV (index=False excludes row numbers)
     df.to_csv(output_path, index=False)
@@ -574,9 +576,10 @@ def write_results_json(results: list[dict], output_path: str) -> None:
     """
     Write results to nested JSON per OUT-02 and D-04.
 
-    Structure: {"file.pdf": {"1": ["12345"], "2": ["67890", "11234"], "3": []}}
+    Structure: {"file.pdf": {"folder_path": "subdir1", "pages": {"1": ["12345"], "2": ["67890", "11234"], "3": []}}}
     Pages with no ID show as empty array (per D-04, PIPE-07).
     Page keys are strings (JSON keys must be strings).
+    folder_path is per-file metadata included in the nested structure.
 
     Args:
         results: List of dicts from process_single_pdf() with 'ids' key (list)
@@ -584,12 +587,19 @@ def write_results_json(results: list[dict], output_path: str) -> None:
     """
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-    nested = defaultdict(dict)
+    nested = {}
     for row in results:
         filename = row['filename']
         page = str(row['page'])
         ids = row['ids']
-        nested[filename][page] = ids
+        folder_path = row.get('folder_path', '')
+
+        if filename not in nested:
+            nested[filename] = {
+                'folder_path': folder_path,
+                'pages': {}
+            }
+        nested[filename]['pages'][page] = ids
 
     with open(output_path, 'w') as f:
         json.dump(dict(nested), f, indent=2)
