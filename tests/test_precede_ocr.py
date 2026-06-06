@@ -3,6 +3,8 @@ import csv
 import json
 import sys
 import io
+import signal
+import multiprocessing as mp
 from pathlib import Path
 from PIL import Image
 from unittest.mock import patch, MagicMock
@@ -38,6 +40,13 @@ from precede_ocr import (
 import time as time_module
 import re
 from dataclasses import asdict
+
+# Phase 7 shutdown imports (available after Task 2 implements them)
+try:
+    from precede_ocr import _init_worker, _handle_sigint
+except ImportError:
+    _init_worker = None
+    _handle_sigint = None
 
 
 # -- normalize_digits tests --
@@ -1989,3 +1998,197 @@ class TestCampaignStateIntegration:
         with open(state_path) as f:
             data = json.load(f)
         assert data['campaign_id'] != 'test'  # Old state was deleted and new one created
+
+
+# -- Phase 7: Graceful Shutdown Tests --
+
+class TestGracefulShutdown:
+    """Tests for graceful shutdown infrastructure (SHUT-01 through SHUT-05)."""
+
+    def test_worker_ignores_sigint(self):
+        """SHUT-02: _init_worker sets SIGINT to SIG_IGN."""
+        assert _init_worker is not None, "_init_worker not yet implemented"
+        original = signal.getsignal(signal.SIGINT)
+        try:
+            _init_worker()
+            assert signal.getsignal(signal.SIGINT) == signal.SIG_IGN
+        finally:
+            signal.signal(signal.SIGINT, original)
+
+    def test_shutdown_event_stops_worker(self, tmp_path):
+        """SHUT-01/D-02: Worker returns [] when shutdown event is set."""
+        assert hasattr(precede_ocr, '_SHUTDOWN_EVENT'), "_SHUTDOWN_EVENT not yet implemented"
+        event = mp.Event()
+        event.set()
+        old_event = precede_ocr._SHUTDOWN_EVENT
+        try:
+            precede_ocr._SHUTDOWN_EVENT = event
+            result = process_single_pdf_wrapper(tmp_path / "dummy.pdf")
+            assert result == []
+        finally:
+            precede_ocr._SHUTDOWN_EVENT = old_event
+
+    def test_shutdown_event_not_set_processes_normally(self):
+        """Regression: Worker processes normally when shutdown event is None."""
+        assert hasattr(precede_ocr, '_SHUTDOWN_EVENT'), "_SHUTDOWN_EVENT not yet implemented"
+        old_event = precede_ocr._SHUTDOWN_EVENT
+        try:
+            precede_ocr._SHUTDOWN_EVENT = None
+            # Mock the actual processing to avoid needing real PDFs
+            with patch('precede_ocr._process_single_pdf_with_retry', return_value=[
+                {'filename': 'test.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': ''}
+            ]):
+                result = process_single_pdf_wrapper(Path("test.pdf"))
+                assert len(result) == 1
+                assert result[0]['ids'] == ['12345']
+        finally:
+            precede_ocr._SHUTDOWN_EVENT = old_event
+
+    def test_handle_sigint_first_press(self):
+        """D-06: First Ctrl+C sets shutdown event and prints drain message."""
+        assert _handle_sigint is not None, "_handle_sigint not yet implemented"
+        event = mp.Event()
+        old_event = precede_ocr._SHUTDOWN_EVENT
+        old_count = precede_ocr._INTERRUPT_COUNT
+        try:
+            precede_ocr._SHUTDOWN_EVENT = event
+            precede_ocr._INTERRUPT_COUNT = 0
+            _handle_sigint(signal.SIGINT, None)
+            assert event.is_set()
+            assert precede_ocr._INTERRUPT_COUNT == 1
+        finally:
+            precede_ocr._SHUTDOWN_EVENT = old_event
+            precede_ocr._INTERRUPT_COUNT = old_count
+
+    def test_double_ctrlc_force_quit(self):
+        """D-03/D-04: Second Ctrl+C raises SystemExit."""
+        assert _handle_sigint is not None, "_handle_sigint not yet implemented"
+        event = mp.Event()
+        old_event = precede_ocr._SHUTDOWN_EVENT
+        old_count = precede_ocr._INTERRUPT_COUNT
+        try:
+            precede_ocr._SHUTDOWN_EVENT = event
+            precede_ocr._INTERRUPT_COUNT = 1  # Simulate first press already happened
+            with pytest.raises(SystemExit):
+                _handle_sigint(signal.SIGINT, None)
+        finally:
+            precede_ocr._SHUTDOWN_EVENT = old_event
+            precede_ocr._INTERRUPT_COUNT = old_count
+
+    def test_tqdm_closed_on_shutdown(self):
+        """SHUT-04: tqdm progress bar closed in finally block."""
+        assert hasattr(precede_ocr, '_SHUTDOWN_EVENT'), "_SHUTDOWN_EVENT not yet implemented"
+        mock_pbar = MagicMock()
+        mock_pool = MagicMock()
+        mock_pool.__enter__ = MagicMock(return_value=mock_pool)
+        mock_pool.__exit__ = MagicMock(return_value=False)
+
+        event = mp.Event()
+        event.set()  # Trigger immediate shutdown
+
+        old_event = precede_ocr._SHUTDOWN_EVENT
+        try:
+            precede_ocr._SHUTDOWN_EVENT = event
+            with patch('precede_ocr.mp.Pool', return_value=mock_pool), \
+                 patch('precede_ocr.tqdm', return_value=mock_pbar), \
+                 patch('precede_ocr.signal.signal'), \
+                 patch('precede_ocr.save_checkpoint_atomic'), \
+                 patch('precede_ocr.save_campaign_state_atomic'):
+                mock_pool.imap_unordered.return_value = iter([])
+                process_all_pdfs([Path("test.pdf")], workers=1)
+            mock_pbar.close.assert_called()
+        finally:
+            precede_ocr._SHUTDOWN_EVENT = old_event
+
+    def test_campaign_state_marked_interrupted(self, tmp_path):
+        """SHUT-05: Campaign state marked interrupted with timestamp."""
+        assert hasattr(precede_ocr, '_SHUTDOWN_EVENT'), "_SHUTDOWN_EVENT not yet implemented"
+        event = mp.Event()
+        event.set()  # Pre-set shutdown
+
+        campaign = CampaignState(campaign_id="test_123", status="running")
+
+        old_event = precede_ocr._SHUTDOWN_EVENT
+        try:
+            precede_ocr._SHUTDOWN_EVENT = event
+            mock_pool = MagicMock()
+            mock_pool.__enter__ = MagicMock(return_value=mock_pool)
+            mock_pool.__exit__ = MagicMock(return_value=False)
+            mock_pool.imap_unordered.return_value = iter([])
+
+            with patch('precede_ocr.mp.Pool', return_value=mock_pool), \
+                 patch('precede_ocr.tqdm', return_value=MagicMock()), \
+                 patch('precede_ocr.signal.signal'), \
+                 patch('precede_ocr.save_checkpoint_atomic'), \
+                 patch('precede_ocr.save_campaign_state_atomic') as mock_save:
+                process_all_pdfs(
+                    [Path("test.pdf")], workers=1,
+                    campaign_state=campaign, output_dir=tmp_path
+                )
+            assert campaign.status == 'interrupted'
+            assert len(campaign.interruptions) == 1
+            assert 'timestamp' in campaign.interruptions[0]
+            assert campaign.interruptions[0]['reason'] == 'user_interrupt'
+            mock_save.assert_called()
+        finally:
+            precede_ocr._SHUTDOWN_EVENT = old_event
+
+    def test_pool_close_join_sequence(self):
+        """SHUT-03: Pool uses close()+join() sequence (context manager handles this)."""
+        assert hasattr(precede_ocr, '_SHUTDOWN_EVENT'), "_SHUTDOWN_EVENT not yet implemented"
+        mock_pool = MagicMock()
+        mock_pool.__enter__ = MagicMock(return_value=mock_pool)
+        mock_pool.__exit__ = MagicMock(return_value=False)
+        mock_pool.imap_unordered.return_value = iter([])
+
+        event = mp.Event()
+        old_event = precede_ocr._SHUTDOWN_EVENT
+        try:
+            precede_ocr._SHUTDOWN_EVENT = event
+            with patch('precede_ocr.mp.Pool', return_value=mock_pool), \
+                 patch('precede_ocr.tqdm', return_value=MagicMock()), \
+                 patch('precede_ocr.signal.signal'), \
+                 patch('precede_ocr.save_checkpoint_atomic'), \
+                 patch('precede_ocr.save_campaign_state_atomic'):
+                process_all_pdfs([Path("test.pdf")], workers=1)
+            # Context manager __exit__ ensures close()+join()
+            mock_pool.__exit__.assert_called()
+        finally:
+            precede_ocr._SHUTDOWN_EVENT = old_event
+
+    def test_graceful_shutdown_breaks_loop(self):
+        """SHUT-01/D-05: Loop breaks when shutdown event is set mid-processing."""
+        assert hasattr(precede_ocr, '_SHUTDOWN_EVENT'), "_SHUTDOWN_EVENT not yet implemented"
+        event = mp.Event()
+        results_batch_1 = [{'filename': 'a.pdf', 'page': 1, 'ids': ['11111'], 'rotation_detected': 90, 'notes': '', 'folder_path': ''}]
+        results_batch_2 = [{'filename': 'b.pdf', 'page': 1, 'ids': ['22222'], 'rotation_detected': 90, 'notes': '', 'folder_path': ''}]
+
+        def fake_imap(*args, **kwargs):
+            yield results_batch_1
+            event.set()  # Simulate Ctrl+C after first result
+            yield results_batch_2  # Should be skipped due to break
+
+        mock_pool = MagicMock()
+        mock_pool.__enter__ = MagicMock(return_value=mock_pool)
+        mock_pool.__exit__ = MagicMock(return_value=False)
+        mock_pool.imap_unordered.side_effect = fake_imap
+
+        mock_pbar = MagicMock()
+
+        old_event = precede_ocr._SHUTDOWN_EVENT
+        try:
+            precede_ocr._SHUTDOWN_EVENT = event
+            with patch('precede_ocr.mp.Pool', return_value=mock_pool), \
+                 patch('precede_ocr.tqdm', return_value=mock_pbar), \
+                 patch('precede_ocr.signal.signal'), \
+                 patch('precede_ocr.save_checkpoint_atomic'), \
+                 patch('precede_ocr.save_campaign_state_atomic'):
+                results = process_all_pdfs(
+                    [Path("a.pdf"), Path("b.pdf")], workers=1
+                )
+            # Only first batch should be in results (loop broke after event.set())
+            assert any(r['filename'] == 'a.pdf' for r in results)
+            # The key assertion is the loop terminates and tqdm is closed
+            mock_pbar.close.assert_called()
+        finally:
+            precede_ocr._SHUTDOWN_EVENT = old_event
