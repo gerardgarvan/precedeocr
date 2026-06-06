@@ -84,6 +84,7 @@ if POPPLER_PATH is None:
 # Module-level config for multiprocessing workers (set by main before pool spawn)
 _ERROR_LOG_PATH = None
 _CHECKPOINT_FREQUENCY = 50
+_INPUT_PATH_ROOT = None  # Set by main() before pool spawn, used by wrapper for folder_path
 
 
 @dataclass
@@ -967,11 +968,25 @@ def process_single_pdf_wrapper(pdf_path: Path) -> list[dict]:
     """
     try:
         results = _process_single_pdf_with_retry(str(pdf_path), debug=False)
+
+        # Inject folder_path into each result dict (D-07, D-08, D-09)
+        if _INPUT_PATH_ROOT is not None:
+            folder_path = compute_folder_path(pdf_path, Path(_INPUT_PATH_ROOT))
+        else:
+            folder_path = ''
+        for result in results:
+            result['folder_path'] = folder_path
+
         return results
     except Exception as e:
         # Log to errors.log (D-09)
         if _ERROR_LOG_PATH is not None:
             log_error_to_file(pdf_path.name, e, Path(_ERROR_LOG_PATH))
+
+        # Compute folder_path for error dict
+        folder_path = ''
+        if _INPUT_PATH_ROOT is not None:
+            folder_path = compute_folder_path(pdf_path, Path(_INPUT_PATH_ROOT))
 
         # Return error dict for CSV notes column (D-10)
         return [{
@@ -979,7 +994,8 @@ def process_single_pdf_wrapper(pdf_path: Path) -> list[dict]:
             'page': 0,
             'ids': [],
             'rotation_detected': None,
-            'notes': f'error: {type(e).__name__}: {str(e)}'
+            'notes': f'error: {type(e).__name__}: {str(e)}',
+            'folder_path': folder_path
         }]
 
 
@@ -987,7 +1003,9 @@ def process_all_pdfs(pdf_paths: list[Path], workers: int,
                      checkpointed_results: list[dict] | None = None,
                      checkpoint_path: Path | None = None,
                      input_path: str = '',
-                     checkpoint_frequency: int = 50) -> list[dict]:
+                     checkpoint_frequency: int = 50,
+                     campaign_state: CampaignState | None = None,
+                     output_dir: Path | None = None) -> list[dict]:
     """
     Process all PDFs in parallel with progress bar, running stats, and periodic checkpointing.
 
@@ -1056,6 +1074,14 @@ def process_all_pdfs(pdf_paths: list[Path], workers: int,
                 )
                 files_since_checkpoint = 0
 
+                # Update campaign state alongside checkpoint (same frequency)
+                if campaign_state is not None and output_dir is not None:
+                    campaign_state.files_processed = len(processed_files)
+                    campaign_state.files_failed = sum(
+                        1 for r in all_results if r.get('page') == 0 and 'error:' in r.get('notes', '')
+                    )
+                    save_campaign_state_atomic(campaign_state, output_dir)
+
             pbar.update(1)
             pbar.set_postfix({
                 'IDs': stats['ids'],
@@ -1071,6 +1097,14 @@ def process_all_pdfs(pdf_paths: list[Path], workers: int,
             all_results, processed_files, input_path,
             checkpoint_path, checkpoint_frequency
         )
+
+    # Final campaign state save
+    if campaign_state is not None and output_dir is not None:
+        campaign_state.files_processed = len(processed_files)
+        campaign_state.files_failed = sum(
+            1 for r in all_results if r.get('page') == 0 and 'error:' in r.get('notes', '')
+        )
+        save_campaign_state_atomic(campaign_state, output_dir)
 
     return all_results
 
@@ -1088,7 +1122,7 @@ def main(input_path: str, output_csv: str, output_json: str | None = None,
         debug: Enable debug OCR output to stderr (single file only)
         fresh: Delete existing checkpoint and start from scratch (D-07)
     """
-    global _ERROR_LOG_PATH
+    global _ERROR_LOG_PATH, _INPUT_PATH_ROOT
 
     # Determine output directory from CSV path
     output_dir = Path(output_csv).parent
@@ -1096,9 +1130,11 @@ def main(input_path: str, output_csv: str, output_json: str | None = None,
     checkpoint_path = output_dir / '.checkpoint.json'
     error_log_path = output_dir / 'errors.log'
     stats_path = output_dir / 'batch_stats.json'
+    campaign_state_path = output_dir / 'campaign_state.json'
 
     # Set module-level error log path for workers
     _ERROR_LOG_PATH = str(error_log_path)
+    _INPUT_PATH_ROOT = input_path
 
     # D-07: --fresh flag deletes checkpoint and error log
     if fresh:
@@ -1108,6 +1144,9 @@ def main(input_path: str, output_csv: str, output_json: str | None = None,
         if error_log_path.exists():
             error_log_path.unlink()
             print("Deleted existing error log (--fresh mode)")
+        if campaign_state_path.exists():
+            campaign_state_path.unlink()
+            print("Deleted existing campaign state (--fresh mode)")
 
     # Discover PDF files
     pdf_paths = discover_pdfs(input_path)
@@ -1117,6 +1156,17 @@ def main(input_path: str, output_csv: str, output_json: str | None = None,
         return
 
     print(f"Found {len(pdf_paths)} PDF file(s)")
+
+    # Campaign state lifecycle (Phase 6)
+    cli_options = {
+        'workers': workers,
+        'checkpoint_frequency': _CHECKPOINT_FREQUENCY,
+        'output_csv': output_csv,
+        'output_json': output_json
+    }
+    campaign_state = load_or_create_campaign_state(output_dir, input_path, cli_options)
+    campaign_state.total_files_discovered = len(pdf_paths)
+    campaign_state.status = 'running'
 
     # Determine JSON output path (D-05: always generate both)
     if output_json is None:
@@ -1134,6 +1184,13 @@ def main(input_path: str, output_csv: str, output_json: str | None = None,
                 print("All files already processed. Use --fresh to reprocess.")
                 # Still write outputs from checkpoint data
                 all_results = checkpointed_results
+
+                # Finalize campaign state for completed resume
+                campaign_state.status = 'completed'
+                campaign_state.completed_at = datetime.now().isoformat()
+                campaign_state.files_processed = len(set(r['filename'] for r in all_results))
+                save_campaign_state_atomic(campaign_state, output_dir)
+
                 # Phase 5 D-06/D-07: Post-hoc sequential validation
                 all_results = validate_sequence(all_results)
                 write_results_csv(all_results, output_csv)
@@ -1159,6 +1216,11 @@ def main(input_path: str, output_csv: str, output_json: str | None = None,
                 'rotation_detected': None,
                 'notes': f'error: {type(e).__name__}: {str(e)}'
             }]
+
+        # Inject folder_path for single file mode
+        for result in all_results:
+            if 'folder_path' not in result:
+                result['folder_path'] = compute_folder_path(pdf_paths[0], Path(input_path))
     else:
         # Multiple files (or resuming): parallel processing with checkpointing
         if workers is None:
@@ -1169,7 +1231,9 @@ def main(input_path: str, output_csv: str, output_json: str | None = None,
             checkpointed_results=checkpointed_results,
             checkpoint_path=checkpoint_path,
             input_path=input_path,
-            checkpoint_frequency=_CHECKPOINT_FREQUENCY
+            checkpoint_frequency=_CHECKPOINT_FREQUENCY,
+            campaign_state=campaign_state,
+            output_dir=output_dir
         )
 
     # Phase 5 D-06/D-07: Post-hoc sequential validation
@@ -1197,6 +1261,15 @@ def main(input_path: str, output_csv: str, output_json: str | None = None,
     with open(stats_path, 'w') as f:
         json.dump(stats, f, indent=2)
     print(f"\nBatch statistics written to {stats_path}")
+
+    # Finalize campaign state
+    campaign_state.status = 'completed'
+    campaign_state.completed_at = datetime.now().isoformat()
+    campaign_state.files_processed = len(set(r['filename'] for r in all_results))
+    campaign_state.files_failed = sum(
+        1 for r in all_results if r.get('page') == 0 and 'error:' in r.get('notes', '')
+    )
+    save_campaign_state_atomic(campaign_state, output_dir)
 
     # Clean up checkpoint after successful completion
     # (keep it — user may want to inspect; next run with --fresh clears it)
