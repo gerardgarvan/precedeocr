@@ -35,7 +35,7 @@ This roadmap delivers campaign management for the v1.0 OCR pipeline, adding prod
 
 Plans:
 - [x] 06-01-PLAN.md -- CampaignState dataclass, atomic save/load, silent upgrade, folder_path utility + unit tests
-- [ ] 06-02-PLAN.md -- Wire campaign state into pipeline (main, process_all_pdfs, wrapper) + integration tests
+- [x] 06-02-PLAN.md -- Wire campaign state into pipeline (main, process_all_pdfs, wrapper) + integration tests
 
 ---
 
