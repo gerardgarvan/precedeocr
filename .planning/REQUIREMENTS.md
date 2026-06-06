@@ -9,9 +9,9 @@ Requirements for Campaign Runner milestone. Each maps to roadmap phases.
 
 ### Campaign State
 
-- [ ] **STATE-01**: Campaign persists state (ID, status, progress, options) to JSON file with atomic writes
-- [ ] **STATE-02**: Campaign tracks per-folder file paths in result data for downstream statistics
-- [ ] **STATE-03**: Campaign logs interruption events with timestamps for debugging
+- [x] **STATE-01**: Campaign persists state (ID, status, progress, options) to JSON file with atomic writes
+- [x] **STATE-02**: Campaign tracks per-folder file paths in result data for downstream statistics
+- [x] **STATE-03**: Campaign logs interruption events with timestamps for debugging
 
 ### Graceful Shutdown
 
@@ -68,9 +68,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| STATE-01 | Phase 6 | Pending |
-| STATE-02 | Phase 6 | Pending |
-| STATE-03 | Phase 6 | Pending |
+| STATE-01 | Phase 6 | Complete |
+| STATE-02 | Phase 6 | Complete |
+| STATE-03 | Phase 6 | Complete |
 | SHUT-01 | Phase 7 | Pending |
 | SHUT-02 | Phase 7 | Pending |
 | SHUT-03 | Phase 7 | Pending |
