@@ -11,6 +11,7 @@ import sys
 import json
 import argparse
 import shutil
+import signal
 import tempfile
 import os
 import time as time_module
@@ -85,6 +86,40 @@ if POPPLER_PATH is None:
 _ERROR_LOG_PATH = None
 _CHECKPOINT_FREQUENCY = 50
 _INPUT_PATH_ROOT = None  # Set by main() before pool spawn, used by wrapper for folder_path
+
+# Graceful shutdown infrastructure (Phase 7)
+_SHUTDOWN_EVENT = None   # multiprocessing.Event, set by process_all_pdfs before pool spawn (D-01)
+_INTERRUPT_COUNT = 0     # Tracks Ctrl+C presses for double-interrupt force-quit (D-03)
+
+
+def _init_worker():
+    """Pool initializer: make workers ignore SIGINT so only main process handles Ctrl+C.
+
+    Per SHUT-02: prevents KeyboardInterrupt injection into workers during OCR processing.
+    Workers check _SHUTDOWN_EVENT instead for cooperative shutdown (D-01).
+    """
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def _handle_sigint(signum, frame):
+    """Handle Ctrl+C: first press sets shutdown flag, second force-quits.
+
+    Per D-03: Second Ctrl+C force-terminates immediately.
+    Per D-04: Force-quit prints warning about in-flight files.
+    Per D-06: First Ctrl+C prints status with in-flight count and force-quit hint.
+    """
+    global _INTERRUPT_COUNT
+    _INTERRUPT_COUNT += 1
+
+    if _INTERRUPT_COUNT == 1:
+        # Per D-06: Tell user what's happening
+        print("\n\nCtrl+C received. Finishing in-flight files... (press Ctrl+C again to force-quit)")
+        if _SHUTDOWN_EVENT is not None:
+            _SHUTDOWN_EVENT.set()
+    else:
+        # Per D-04: Force-quit warning
+        print("\n\nForce-quit! In-flight files may not be saved. Checkpoint has all completed files.")
+        sys.exit(1)
 
 
 @dataclass
@@ -976,6 +1011,11 @@ def process_single_pdf_wrapper(pdf_path: Path) -> list[dict]:
     Must be top-level function for Windows spawn pickling.
     Uses module-level _ERROR_LOG_PATH set by main() before pool creation.
     """
+    # Per D-02: Check shutdown at file-level granularity (not page-level)
+    # Worker completes current PDF or skips entirely — no partial files
+    if _SHUTDOWN_EVENT is not None and _SHUTDOWN_EVENT.is_set():
+        return []
+
     try:
         results = _process_single_pdf_with_retry(str(pdf_path), debug=False)
 
@@ -1017,11 +1057,13 @@ def process_all_pdfs(pdf_paths: list[Path], workers: int,
                      campaign_state: CampaignState | None = None,
                      output_dir: Path | None = None) -> list[dict]:
     """
-    Process all PDFs in parallel with progress bar, running stats, and periodic checkpointing.
+    Process all PDFs in parallel with progress bar, running stats, periodic checkpointing,
+    and graceful shutdown support (Phase 7).
 
     Per D-03: Saves checkpoint every checkpoint_frequency files (default 50).
     Per D-04: Returns merged results (checkpointed + newly processed).
     Per D-14: Tracks resume-aware metrics (checkpointed vs newly processed counts).
+    Per SHUT-01: Ctrl+C breaks loop, workers finish current file, state saved.
 
     Args:
         pdf_paths: List of REMAINING PDF file paths (already filtered)
@@ -1029,11 +1071,15 @@ def process_all_pdfs(pdf_paths: list[Path], workers: int,
         checkpointed_results: Previously checkpointed results to merge (default: empty)
         checkpoint_path: Path to .checkpoint.json file (None = no checkpointing)
         input_path: Original input path string (stored in checkpoint metadata)
-        checkpoint_frequency: Save checkpoint every N files (default 50, per D-03 Claude's discretion)
+        checkpoint_frequency: Save checkpoint every N files (default 50)
+        campaign_state: CampaignState object for interruption tracking (Phase 6/7)
+        output_dir: Output directory for campaign state saves
 
     Returns:
         Flat list of ALL result dicts (checkpointed + new)
     """
+    global _SHUTDOWN_EVENT, _INTERRUPT_COUNT
+
     if checkpointed_results is None:
         checkpointed_results = []
 
@@ -1047,74 +1093,116 @@ def process_all_pdfs(pdf_paths: list[Path], workers: int,
 
     chunksize = max(1, len(pdf_paths) // (4 * workers))
 
-    with mp.Pool(processes=workers, maxtasksperchild=50) as pool:
-        pbar = tqdm(
-            total=total_files,
-            initial=len(checkpointed_results),  # Resume offset
-            desc="Processing PDFs",
-            unit="file"
-        )
+    # Phase 7: Install shutdown infrastructure before pool creation
+    if _SHUTDOWN_EVENT is None:
+        _SHUTDOWN_EVENT = mp.Event()
+    _INTERRUPT_COUNT = 0
+    original_sigint = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, _handle_sigint)
 
-        for file_results in pool.imap_unordered(
-            process_single_pdf_wrapper,
-            pdf_paths,
-            chunksize=chunksize
-        ):
-            all_results.extend(file_results)
+    try:
+        with mp.Pool(processes=workers, maxtasksperchild=50, initializer=_init_worker) as pool:
+            pbar = tqdm(
+                total=total_files,
+                initial=len(checkpointed_results),  # Resume offset
+                desc="Processing PDFs",
+                unit="file"
+            )
 
-            # Track processed file
-            if file_results:
-                processed_files.add(file_results[0]['filename'])
-            files_since_checkpoint += 1
+            try:
+                for file_results in pool.imap_unordered(
+                    process_single_pdf_wrapper,
+                    pdf_paths,
+                    chunksize=chunksize
+                ):
+                    # Phase 7: Check shutdown flag before processing result (D-05)
+                    if _SHUTDOWN_EVENT.is_set():
+                        break
 
-            # Update running stats (D-09)
-            for r in file_results:
-                if r['page'] == 0 and 'error:' in r.get('notes', ''):
-                    stats['errors'] += 1
-                elif r['ids']:
-                    stats['ids'] += len(r['ids'])
-                else:
-                    stats['no_id_pages'] += 1
+                    all_results.extend(file_results)
 
-            # Periodic checkpoint save (per D-03: every checkpoint_frequency files)
-            if checkpoint_path and files_since_checkpoint >= checkpoint_frequency:
-                save_checkpoint_atomic(
-                    all_results, processed_files, input_path,
-                    checkpoint_path, checkpoint_frequency
+                    # Track processed file
+                    if file_results:
+                        processed_files.add(file_results[0]['filename'])
+                    files_since_checkpoint += 1
+
+                    # Update running stats (D-09)
+                    for r in file_results:
+                        if r['page'] == 0 and 'error:' in r.get('notes', ''):
+                            stats['errors'] += 1
+                        elif r['ids']:
+                            stats['ids'] += len(r['ids'])
+                        else:
+                            stats['no_id_pages'] += 1
+
+                    # Periodic checkpoint save (per D-03: every checkpoint_frequency files)
+                    if checkpoint_path and files_since_checkpoint >= checkpoint_frequency:
+                        save_checkpoint_atomic(
+                            all_results, processed_files, input_path,
+                            checkpoint_path, checkpoint_frequency
+                        )
+                        files_since_checkpoint = 0
+
+                        # Update campaign state alongside checkpoint (same frequency)
+                        if campaign_state is not None and output_dir is not None:
+                            campaign_state.files_processed = len(processed_files)
+                            campaign_state.files_failed = sum(
+                                1 for r in all_results if r.get('page') == 0 and 'error:' in r.get('notes', '')
+                            )
+                            save_campaign_state_atomic(campaign_state, output_dir)
+
+                    pbar.update(1)
+                    pbar.set_postfix({
+                        'IDs': stats['ids'],
+                        'No-ID': stats['no_id_pages'],
+                        'Errors': stats['errors']
+                    })
+
+            finally:
+                # Per SHUT-04: Always close tqdm to prevent terminal corruption
+                pbar.close()
+
+        # After pool context manager exits (close+join complete per SHUT-03):
+
+        # Final checkpoint save (ensure all results persisted)
+        if checkpoint_path:
+            save_checkpoint_atomic(
+                all_results, processed_files, input_path,
+                checkpoint_path, checkpoint_frequency
+            )
+
+        # Handle interruption state (SHUT-05)
+        if _SHUTDOWN_EVENT.is_set():
+            if campaign_state is not None:
+                campaign_state.status = 'interrupted'
+                campaign_state.interruptions.append({
+                    'timestamp': datetime.now().isoformat(),
+                    'files_completed': len(processed_files),
+                    'reason': 'user_interrupt'
+                })
+            if campaign_state is not None and output_dir is not None:
+                campaign_state.files_processed = len(processed_files)
+                campaign_state.files_failed = sum(
+                    1 for r in all_results if r.get('page') == 0 and 'error:' in r.get('notes', '')
                 )
-                files_since_checkpoint = 0
+                save_campaign_state_atomic(campaign_state, output_dir)
 
-                # Update campaign state alongside checkpoint (same frequency)
-                if campaign_state is not None and output_dir is not None:
-                    campaign_state.files_processed = len(processed_files)
-                    campaign_state.files_failed = sum(
-                        1 for r in all_results if r.get('page') == 0 and 'error:' in r.get('notes', '')
-                    )
-                    save_campaign_state_atomic(campaign_state, output_dir)
+            # Per D-07: Brief summary on graceful shutdown
+            total = len(pdf_paths) + len(checkpointed_results)
+            ids_found = sum(len(r['ids']) for r in all_results if r.get('ids'))
+            print(f"\nInterrupted: {len(processed_files)}/{total} files processed ({ids_found} IDs found). State saved. Resume with same command.")
+        else:
+            # Normal completion: finalize campaign state
+            if campaign_state is not None and output_dir is not None:
+                campaign_state.files_processed = len(processed_files)
+                campaign_state.files_failed = sum(
+                    1 for r in all_results if r.get('page') == 0 and 'error:' in r.get('notes', '')
+                )
+                save_campaign_state_atomic(campaign_state, output_dir)
 
-            pbar.update(1)
-            pbar.set_postfix({
-                'IDs': stats['ids'],
-                'No-ID': stats['no_id_pages'],
-                'Errors': stats['errors']
-            })
-
-        pbar.close()
-
-    # Final checkpoint save (ensure all results persisted)
-    if checkpoint_path:
-        save_checkpoint_atomic(
-            all_results, processed_files, input_path,
-            checkpoint_path, checkpoint_frequency
-        )
-
-    # Final campaign state save
-    if campaign_state is not None and output_dir is not None:
-        campaign_state.files_processed = len(processed_files)
-        campaign_state.files_failed = sum(
-            1 for r in all_results if r.get('page') == 0 and 'error:' in r.get('notes', '')
-        )
-        save_campaign_state_atomic(campaign_state, output_dir)
+    finally:
+        # Restore original signal handler (important for tests and nested calls)
+        signal.signal(signal.SIGINT, original_sigint)
 
     return all_results
 

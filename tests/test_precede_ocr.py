@@ -699,7 +699,7 @@ class TestProcessAllPdfs:
             ])
             mock_pool_class.return_value = mock_pool
             process_all_pdfs(pdf_paths, workers=2)
-            mock_pool_class.assert_called_once_with(processes=2, maxtasksperchild=50)
+            mock_pool_class.assert_called_once_with(processes=2, maxtasksperchild=50, initializer=precede_ocr._init_worker)
 
 
 # -- retry_once tests --
