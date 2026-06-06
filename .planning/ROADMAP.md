@@ -54,7 +54,11 @@ Plans:
 4. User can resume after Ctrl+C and campaign state shows "interrupted" status with timestamp
 5. User can verify no zombie worker processes remain in Task Manager after Ctrl+C shutdown
 
-**Plans**: TBD
+**Plans:** 2 plans
+
+Plans:
+- [ ] 07-01-PLAN.md -- Shutdown tests + implementation (signal handler, worker protection, Event, pool drain, tqdm cleanup, campaign state interruption)
+- [ ] 07-02-PLAN.md -- Manual verification checkpoint: Ctrl+C testing on Windows 10
 
 ---
 
@@ -100,8 +104,8 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 6. Enhanced Campaign State Schema | 2/3 | Gap closure planned | - |
-| 7. Graceful Shutdown Infrastructure | 0/0 | Not started | - |
+| 6. Enhanced Campaign State Schema | 3/3 | Complete | 2026-06-06 |
+| 7. Graceful Shutdown Infrastructure | 0/2 | Planned | - |
 | 8. Interactive Campaign Menu | 0/0 | Not started | - |
 | 9. Per-Folder Statistics & Reporting | 0/0 | Not started | - |
 
