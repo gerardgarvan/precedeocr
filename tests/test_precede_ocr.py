@@ -29,8 +29,14 @@ from precede_ocr import (
     main,
     preprocess_image,
     validate_sequence,
+    CampaignState,
+    save_campaign_state_atomic,
+    load_or_create_campaign_state,
+    compute_folder_path,
 )
 import time as time_module
+import re
+from dataclasses import asdict
 
 
 # -- normalize_digits tests --
@@ -1687,3 +1693,142 @@ class TestMainSequenceValidation:
         normal_rows = [r for r in rows if r['page'] != '6']
         for row in normal_rows:
             assert 'seq_outlier' not in row['notes'], f"Page {row['page']} should not be flagged"
+
+
+# -- Phase 6: Campaign State Tests --
+
+class TestCampaignState:
+    def test_default_values(self):
+        state = CampaignState()
+        assert state.version == "1.1"
+        assert state.status == "running"
+        assert state.interruptions == []
+        assert state.folder_stats == {}
+        assert state.options == {}
+        assert state.files_processed == 0
+        assert state.files_failed == 0
+
+    def test_generate_campaign_id_format(self):
+        cid = CampaignState.generate_campaign_id()
+        assert re.match(r'^campaign_\d{8}_\d{6}$', cid)
+
+    def test_interruptions_empty_by_default(self):
+        state = CampaignState()
+        assert isinstance(state.interruptions, list)
+        assert len(state.interruptions) == 0
+
+
+class TestSaveCampaignStateAtomic:
+    def test_creates_valid_json(self, temp_dir):
+        state = CampaignState(campaign_id="campaign_20260605_100000", input_path="/test")
+        save_campaign_state_atomic(state, Path(temp_dir))
+        state_path = Path(temp_dir) / 'campaign_state.json'
+        assert state_path.is_file()
+        with open(state_path) as f:
+            data = json.load(f)
+        assert data['campaign_id'] == "campaign_20260605_100000"
+        assert data['version'] == "1.1"
+
+    def test_no_tmp_files_left(self, temp_dir):
+        state = CampaignState(campaign_id="test")
+        save_campaign_state_atomic(state, Path(temp_dir))
+        tmp_files = list(Path(temp_dir).glob("*.tmp"))
+        assert len(tmp_files) == 0
+
+    def test_updates_last_updated(self, temp_dir):
+        state = CampaignState(campaign_id="test", last_updated="old")
+        save_campaign_state_atomic(state, Path(temp_dir))
+        assert state.last_updated != "old"
+
+
+class TestLoadOrCreateCampaignState:
+    def test_fresh_start_creates_new(self, temp_dir, capsys):
+        state = load_or_create_campaign_state(Path(temp_dir), "/input", {})
+        assert state.campaign_id.startswith("campaign_")
+        assert state.status == "running"
+        assert state.input_path == "/input"
+        assert "Starting new campaign" in capsys.readouterr().out
+
+    def test_loads_existing_state(self, temp_dir, capsys):
+        state_path = Path(temp_dir) / 'campaign_state.json'
+        state_dict = asdict(CampaignState(
+            campaign_id="campaign_20260605_100000",
+            input_path="/input", status="interrupted"
+        ))
+        with open(state_path, 'w') as f:
+            json.dump(state_dict, f)
+        state = load_or_create_campaign_state(Path(temp_dir), "/input", {})
+        assert state.campaign_id == "campaign_20260605_100000"
+        assert state.status == "interrupted"
+        assert "Resuming campaign" in capsys.readouterr().out
+
+    def test_silent_upgrade_from_v1_checkpoint(self, temp_dir, capsys):
+        checkpoint_path = Path(temp_dir) / '.checkpoint.json'
+        checkpoint_data = {
+            "metadata": {"version": "1.0", "input_path": "/input",
+                         "processed_count": 5, "timestamp": "2026-06-05T10:00:00",
+                         "checkpoint_frequency": 50},
+            "results": [], "processed_files": ["a.pdf", "b.pdf", "c.pdf", "d.pdf", "e.pdf"]
+        }
+        with open(checkpoint_path, 'w') as f:
+            json.dump(checkpoint_data, f)
+        state = load_or_create_campaign_state(Path(temp_dir), "/input", {})
+        assert state.campaign_id == "campaign_20260605_100000"
+        assert state.status == "interrupted"
+        assert state.files_processed == 5
+        output = capsys.readouterr().out
+        assert "Upgraded to campaign tracking" in output
+
+    def test_corrupt_state_recreates_fresh(self, temp_dir, capsys):
+        state_path = Path(temp_dir) / 'campaign_state.json'
+        with open(state_path, 'w') as f:
+            f.write("NOT VALID JSON{{{")
+        state = load_or_create_campaign_state(Path(temp_dir), "/input", {})
+        assert state.campaign_id.startswith("campaign_")
+        assert state.status == "running"
+        output = capsys.readouterr().out
+        assert "Corrupt campaign state" in output
+
+    def test_input_path_mismatch_warns(self, temp_dir, capsys):
+        state_path = Path(temp_dir) / 'campaign_state.json'
+        state_dict = asdict(CampaignState(
+            campaign_id="campaign_20260605_100000",
+            input_path="/old/path", status="interrupted"
+        ))
+        with open(state_path, 'w') as f:
+            json.dump(state_dict, f)
+        state = load_or_create_campaign_state(Path(temp_dir), "/new/path", {})
+        output = capsys.readouterr().out
+        assert "WARNING" in output
+        assert "/old/path" in output
+
+
+class TestComputeFolderPath:
+    def test_subdirectory_relative_path(self, temp_dir):
+        sub = Path(temp_dir) / "subdir1" / "batch2"
+        sub.mkdir(parents=True)
+        pdf = sub / "file.pdf"
+        pdf.touch()
+        result = compute_folder_path(pdf, Path(temp_dir))
+        assert "subdir1" in result
+        assert "batch2" in result
+
+    def test_root_directory_empty_string(self, temp_dir):
+        pdf = Path(temp_dir) / "file.pdf"
+        pdf.touch()
+        result = compute_folder_path(pdf, Path(temp_dir))
+        assert result == ''
+
+    def test_uses_resolve_for_normalization(self, temp_dir):
+        pdf = Path(temp_dir) / "file.pdf"
+        pdf.touch()
+        result = compute_folder_path(pdf, Path(temp_dir))
+        assert result == ''
+
+    def test_outside_input_directory(self, temp_dir):
+        import tempfile as tf
+        with tf.TemporaryDirectory() as other:
+            pdf = Path(other) / "file.pdf"
+            pdf.touch()
+            result = compute_folder_path(pdf, Path(temp_dir))
+            assert len(result) > 0  # Returns absolute path, not empty

@@ -19,6 +19,8 @@ from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
 from functools import wraps
+from dataclasses import dataclass, field, asdict
+from typing import Optional
 from PIL import Image
 from tqdm import tqdm
 import cv2
@@ -82,6 +84,125 @@ if POPPLER_PATH is None:
 # Module-level config for multiprocessing workers (set by main before pool spawn)
 _ERROR_LOG_PATH = None
 _CHECKPOINT_FREQUENCY = 50
+
+
+@dataclass
+class CampaignState:
+    """Campaign orchestration metadata (separate from checkpoint results)."""
+    version: str = "1.1"
+    campaign_id: str = ""
+    input_path: str = ""
+    status: str = "running"  # running | interrupted | completed | failed
+    started_at: str = ""
+    last_updated: str = ""
+    completed_at: Optional[str] = None
+    total_files_discovered: int = 0
+    files_processed: int = 0
+    files_failed: int = 0
+    folder_stats: dict = field(default_factory=dict)
+    interruptions: list = field(default_factory=list)
+    options: dict = field(default_factory=dict)
+
+    @classmethod
+    def generate_campaign_id(cls) -> str:
+        """Generate campaign ID per D-01: campaign_YYYYMMDD_HHMMSS."""
+        now = datetime.now()
+        return f"campaign_{now.strftime('%Y%m%d_%H%M%S')}"
+
+
+def save_campaign_state_atomic(state: CampaignState, output_dir: Path) -> None:
+    """Atomically save campaign state JSON. Same pattern as save_checkpoint_atomic."""
+    state_path = Path(output_dir) / 'campaign_state.json'
+    temp_dir = state_path.parent
+    state.last_updated = datetime.now().isoformat()
+    state_dict = asdict(state)
+    with tempfile.NamedTemporaryFile(
+        mode='w', dir=temp_dir, delete=False, suffix='.tmp', prefix='.campaign_state_'
+    ) as tmp_file:
+        json.dump(state_dict, tmp_file, indent=2)
+        tmp_file.flush()
+        os.fsync(tmp_file.fileno())
+        tmp_path = tmp_file.name
+    os.replace(tmp_path, str(state_path))
+
+
+def load_or_create_campaign_state(
+    output_dir: Path, input_path: str, cli_options: dict
+) -> CampaignState:
+    """Load existing campaign state, upgrade from v1.0 checkpoint, or create fresh."""
+    state_path = Path(output_dir) / 'campaign_state.json'
+    checkpoint_path = Path(output_dir) / '.checkpoint.json'
+
+    # Case 1: Campaign state exists — load it
+    if state_path.exists():
+        try:
+            with open(state_path) as f:
+                state_dict = json.load(f)
+            state = CampaignState(**{
+                k: v for k, v in state_dict.items()
+                if k in CampaignState.__dataclass_fields__
+            })
+            if state.input_path != input_path:
+                print(f"WARNING: Campaign was for '{state.input_path}', now processing '{input_path}'")
+            print(f"Resuming campaign: {state.campaign_id} ({state.status})")
+            return state
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            print(f"WARNING: Corrupt campaign state, recreating: {e}")
+            state_path.unlink(missing_ok=True)
+
+    # Case 2: v1.0 checkpoint exists, no campaign state — silent upgrade (D-05)
+    if checkpoint_path.exists():
+        try:
+            with open(checkpoint_path) as f:
+                checkpoint = json.load(f)
+            metadata = checkpoint.get('metadata', {})
+            processed_files = checkpoint.get('processed_files', [])
+            checkpoint_ts = metadata.get('timestamp', datetime.now().isoformat())
+            try:
+                dt = datetime.fromisoformat(checkpoint_ts)
+            except (ValueError, TypeError):
+                dt = datetime.now()
+            campaign_id = f"campaign_{dt.strftime('%Y%m%d_%H%M%S')}"
+            state = CampaignState(
+                campaign_id=campaign_id,
+                input_path=input_path,
+                status='interrupted',
+                started_at=checkpoint_ts,
+                files_processed=len(processed_files),
+                options=cli_options
+            )
+            print(f"Upgraded to campaign tracking: {campaign_id}")  # D-06
+            save_campaign_state_atomic(state, output_dir)
+            return state
+        except (json.JSONDecodeError, KeyError) as e:
+            print(f"WARNING: Corrupt checkpoint during upgrade, starting fresh: {e}")
+
+    # Case 3: Fresh start
+    state = CampaignState(
+        campaign_id=CampaignState.generate_campaign_id(),
+        input_path=input_path,
+        started_at=datetime.now().isoformat(),
+        options=cli_options
+    )
+    print(f"Starting new campaign: {state.campaign_id}")
+    save_campaign_state_atomic(state, output_dir)
+    return state
+
+
+def compute_folder_path(pdf_path: Path, input_path_root: Path) -> str:
+    """Compute folder_path relative to input_path_root with normalization per D-07/D-08/D-09."""
+    pdf_resolved = pdf_path.resolve()
+    input_resolved = input_path_root.resolve()
+    pdf_folder = pdf_resolved.parent
+    try:
+        rel_folder = pdf_folder.relative_to(input_resolved)
+        folder_path = str(rel_folder)
+    except ValueError:
+        folder_path = str(pdf_folder)
+        return folder_path
+    if folder_path == '.':
+        folder_path = ''
+    return folder_path
 
 
 def normalize_digits(text: str) -> str:
