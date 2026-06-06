@@ -1091,7 +1091,7 @@ def process_all_pdfs(pdf_paths: list[Path], workers: int,
     # Calculate total for progress bar (remaining + already done)
     total_files = len(pdf_paths) + len(checkpointed_results)
 
-    chunksize = max(1, len(pdf_paths) // (4 * workers))
+    chunksize = max(1, min(10, len(pdf_paths) // (4 * workers)))
 
     # Phase 7: Install shutdown infrastructure before pool creation
     if _SHUTDOWN_EVENT is None:
