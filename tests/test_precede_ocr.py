@@ -6,6 +6,7 @@ import io
 from pathlib import Path
 from PIL import Image
 from unittest.mock import patch, MagicMock
+import precede_ocr
 
 from precede_ocr import (
     normalize_digits,
@@ -1832,3 +1833,89 @@ class TestComputeFolderPath:
             pdf.touch()
             result = compute_folder_path(pdf, Path(temp_dir))
             assert len(result) > 0  # Returns absolute path, not empty
+
+
+class TestFolderPathInResults:
+    def test_wrapper_includes_folder_path_when_root_set(self, temp_dir):
+        """process_single_pdf_wrapper includes folder_path in results when _INPUT_PATH_ROOT is set."""
+        # Create a minimal test PDF
+        pdf_path = Path(temp_dir) / "subdir" / "test.pdf"
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        # Test compute_folder_path directly
+        old_root = precede_ocr._INPUT_PATH_ROOT
+        try:
+            precede_ocr._INPUT_PATH_ROOT = temp_dir
+            folder = compute_folder_path(pdf_path, Path(temp_dir))
+            assert folder == "subdir"
+        finally:
+            precede_ocr._INPUT_PATH_ROOT = old_root
+
+    def test_wrapper_folder_path_empty_for_root(self, temp_dir):
+        """Files in root of input_path get folder_path=''."""
+        pdf_path = Path(temp_dir) / "test.pdf"
+        pdf_path.touch()
+        folder = compute_folder_path(pdf_path, Path(temp_dir))
+        assert folder == ''
+
+    def test_error_dict_includes_folder_path(self, temp_dir):
+        """Error result dicts include folder_path key."""
+        old_root = precede_ocr._INPUT_PATH_ROOT
+        try:
+            precede_ocr._INPUT_PATH_ROOT = temp_dir
+            # process_single_pdf_wrapper with nonexistent file triggers error path
+            results = process_single_pdf_wrapper(Path(temp_dir) / "nonexistent.pdf")
+            assert len(results) == 1
+            assert 'folder_path' in results[0]
+            assert 'error:' in results[0]['notes']
+        finally:
+            precede_ocr._INPUT_PATH_ROOT = old_root
+
+
+class TestCampaignStateIntegration:
+    @patch('precede_ocr.process_single_pdf')
+    def test_main_creates_campaign_state_with_mock(self, mock_process, temp_dir):
+        """main() creates campaign_state.json in output directory."""
+        mock_process.return_value = [
+            {'filename': 'test.pdf', 'page': 1, 'ids': ['12345'],
+             'rotation_detected': 90, 'notes': '', 'folder_path': ''}
+        ]
+        pdf_dir = Path(temp_dir) / "pdfs"
+        pdf_dir.mkdir()
+        # Create minimal PDF file (just needs to exist for discover_pdfs)
+        (pdf_dir / "test.pdf").write_bytes(b'%PDF-1.4 minimal')
+        output_csv = str(Path(temp_dir) / "output" / "results.csv")
+        main(str(pdf_dir), output_csv)
+        state_path = Path(temp_dir) / "output" / "campaign_state.json"
+        assert state_path.is_file(), "campaign_state.json should exist after main()"
+        with open(state_path) as f:
+            data = json.load(f)
+        assert data['status'] == 'completed'
+        assert data['campaign_id'].startswith('campaign_')
+        assert data['version'] == '1.1'
+
+    @patch('precede_ocr.process_single_pdf')
+    def test_fresh_flag_deletes_campaign_state(self, mock_process, temp_dir):
+        """--fresh flag removes campaign_state.json."""
+        output_dir = Path(temp_dir) / "output"
+        output_dir.mkdir(parents=True)
+        # Create a dummy campaign state
+        state_path = output_dir / "campaign_state.json"
+        with open(state_path, 'w') as f:
+            json.dump({"campaign_id": "test", "version": "1.1"}, f)
+
+        # Also need a PDF to avoid early exit
+        pdf_dir = Path(temp_dir) / "pdfs"
+        pdf_dir.mkdir()
+        (pdf_dir / "test.pdf").write_bytes(b'%PDF-1.4 minimal')
+
+        mock_process.return_value = [
+            {'filename': 'test.pdf', 'page': 1, 'ids': ['12345'],
+             'rotation_detected': 90, 'notes': '', 'folder_path': ''}
+        ]
+
+        output_csv = str(output_dir / "results.csv")
+        main(str(pdf_dir), output_csv, fresh=True)
+        # Campaign state should be recreated (fresh), not the old one
+        with open(state_path) as f:
+            data = json.load(f)
+        assert data['campaign_id'] != 'test'  # Old state was deleted and new one created
