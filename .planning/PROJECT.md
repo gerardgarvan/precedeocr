@@ -11,8 +11,9 @@ Reliably extract every Precede ID from every page across 30K+ PDFs so the user c
 ## Current State
 
 Shipped v1.0 with 2,790 LOC Python (1,101 pipeline + 1,689 tests).
+Phase 6 complete — campaign state infrastructure with atomic writes, silent v1.0 upgrade, folder_path tracking in output files.
 Tech stack: Python 3, pytesseract, pdf2image/Poppler, OpenCV, Pillow, pandas, scipy.
-141 tests passing. 94.9% baseline OCR accuracy on test corpus.
+166 tests passing. 94.9% baseline OCR accuracy on test corpus.
 
 CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N --debug --fresh`
 
@@ -89,6 +90,7 @@ CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N
 | Local Tesseract (no cloud OCR) | Dependencies already installed, no API costs at scale, simpler pipeline | ✓ Good — zero cost, no network dependency |
 | multiprocessing.Pool parallelization | 30K+ files makes serial processing impractical; cpu_count()-1 workers | ✓ Good — process recycling prevents memory leaks |
 | Atomic checkpoint writes (tempfile + os.replace) | Prevents corruption on crash | ✓ Good — crash-safe resume verified |
+| Separate campaign_state.json from .checkpoint.json | Campaign metadata (ID, status, interruptions) decoupled from granular results | ✓ Good — independent evolution, silent upgrade from v1.0 |
 | Conditional preprocessing (OpenCV fallback) | Only preprocess when initial OCR fails — avoids degrading good scans | ✓ Good — targeted improvement without side effects |
 | Theil-Sen robust regression for sequence validation | OLS too sensitive to outliers; Theil-Sen + modified Z-score more reliable | ✓ Good — corrected from initial OLS approach in Phase 5 gap closure |
 | PSM 6 for Tesseract | Middle ground for full-page scans with isolated IDs | ✓ Good — better than PSM 7 (too restrictive) or PSM 3 (too broad) |
@@ -112,4 +114,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-05 after v1.1 milestone started*
+*Last updated: 2026-06-06 after Phase 6 completion*
