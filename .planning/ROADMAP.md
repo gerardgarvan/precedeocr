@@ -98,7 +98,11 @@ Plans:
 4. User can open campaign_report.md and see per-folder statistics table with problem area highlights and recommendations
 5. User can see preprocessing fallback trigger rates and rotation distribution (90/270/0/180) in campaign report
 
-**Plans**: TBD
+**Plans:** 2 plans
+
+Plans:
+- [ ] 09-01-PLAN.md -- Stats accumulation infrastructure: categorize_errors(), folder stats in process_all_pdfs(), enhanced print_batch_stats(), enhanced handle_view_stats() + unit tests
+- [ ] 09-02-PLAN.md -- Markdown report generation: generate_campaign_report() with problem highlighting, wired into main() and rerun handler + tests
 
 ---
 
@@ -109,7 +113,7 @@ Plans:
 | 6. Enhanced Campaign State Schema | 3/3 | Complete | 2026-06-06 |
 | 7. Graceful Shutdown Infrastructure | 0/2 | Planned | - |
 | 8. Interactive Campaign Menu | 2/2 | Complete   | 2026-06-07 |
-| 9. Per-Folder Statistics & Reporting | 0/0 | Not started | - |
+| 9. Per-Folder Statistics & Reporting | 0/2 | Planned | - |
 
 ---
 
