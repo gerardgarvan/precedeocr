@@ -101,7 +101,7 @@ Plans:
 **Plans:** 2 plans
 
 Plans:
-- [ ] 09-01-PLAN.md -- Stats accumulation infrastructure: categorize_errors(), folder stats in process_all_pdfs(), enhanced print_batch_stats(), enhanced handle_view_stats() + unit tests
+- [x] 09-01-PLAN.md -- Stats accumulation infrastructure: categorize_errors(), folder stats in process_all_pdfs(), enhanced print_batch_stats(), enhanced handle_view_stats() + unit tests
 - [ ] 09-02-PLAN.md -- Markdown report generation: generate_campaign_report() with problem highlighting, wired into main() and rerun handler + tests
 
 ---
