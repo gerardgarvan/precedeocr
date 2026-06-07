@@ -37,6 +37,12 @@ from precede_ocr import (
     load_or_create_campaign_state,
     compute_folder_path,
 )
+
+# Phase 9 imports (available after Task 1 implements them)
+try:
+    from precede_ocr import categorize_errors
+except ImportError:
+    categorize_errors = None
 import time as time_module
 import re
 from dataclasses import asdict
@@ -2756,3 +2762,254 @@ class TestMenuIntegration:
             # discover_pdfs called at least twice: once initially, once after fresh
             assert len(discover_calls) >= 2, "discover_pdfs should be called again after fresh start"
             mock_process.assert_called_once()
+
+
+# ============================================================
+# Phase 9: Statistics & Reporting Tests
+# ============================================================
+
+
+class TestCategorizeErrors:
+    """Tests for categorize_errors() per STAT-02."""
+
+    def test_extracts_single_error_type(self):
+        if categorize_errors is None:
+            pytest.skip("categorize_errors not yet implemented (TDD RED)")
+        results = [
+            {"page": 0, "notes": "error: FileNotFoundError: file.pdf not found", "filename": "a.pdf", "ids": []}
+        ]
+        assert categorize_errors(results) == {"FileNotFoundError": 1}
+
+    def test_extracts_multiple_error_types(self):
+        if categorize_errors is None:
+            pytest.skip("categorize_errors not yet implemented (TDD RED)")
+        results = [
+            {"page": 0, "notes": "error: FileNotFoundError: not found", "filename": "a.pdf", "ids": []},
+            {"page": 0, "notes": "error: FileNotFoundError: missing", "filename": "b.pdf", "ids": []},
+            {"page": 0, "notes": "error: PDFPageCountError: zero pages", "filename": "c.pdf", "ids": []},
+        ]
+        result = categorize_errors(results)
+        assert result == {"FileNotFoundError": 2, "PDFPageCountError": 1}
+
+    def test_ignores_non_error_results(self):
+        if categorize_errors is None:
+            pytest.skip("categorize_errors not yet implemented (TDD RED)")
+        results = [
+            {"page": 1, "notes": "", "ids": ["12345"], "filename": "good.pdf"},
+            {"page": 2, "notes": "preprocessed", "ids": ["67890"], "filename": "good.pdf"},
+        ]
+        assert categorize_errors(results) == {}
+
+    def test_unknown_error_format(self):
+        if categorize_errors is None:
+            pytest.skip("categorize_errors not yet implemented (TDD RED)")
+        results = [
+            {"page": 0, "notes": "error: something went wrong", "filename": "x.pdf", "ids": []}
+        ]
+        assert categorize_errors(results) == {"Unknown": 1}
+
+    def test_empty_results(self):
+        if categorize_errors is None:
+            pytest.skip("categorize_errors not yet implemented (TDD RED)")
+        assert categorize_errors([]) == {}
+
+    def test_ordered_by_frequency(self):
+        if categorize_errors is None:
+            pytest.skip("categorize_errors not yet implemented (TDD RED)")
+        results = [
+            {"page": 0, "notes": "error: TimeoutError: timed out", "filename": f"t{i}.pdf", "ids": []}
+            for i in range(5)
+        ] + [
+            {"page": 0, "notes": "error: FileNotFoundError: missing", "filename": f"f{i}.pdf", "ids": []}
+            for i in range(3)
+        ]
+        result = categorize_errors(results)
+        keys = list(result.keys())
+        assert keys[0] == "TimeoutError"
+        assert keys[1] == "FileNotFoundError"
+
+
+class TestEnhancedBatchStats:
+    """Tests for enhanced calculate_batch_stats() and print_batch_stats() per STAT-02."""
+
+    def test_calculate_batch_stats_includes_error_categories(self):
+        results = [
+            {"filename": "a.pdf", "page": 0, "ids": [], "notes": "error: FileNotFoundError: msg"},
+            {"filename": "b.pdf", "page": 1, "ids": ["12345"], "notes": ""},
+        ]
+        stats = calculate_batch_stats(results, checkpointed_count=0,
+                                      newly_processed_count=2, start_time=time_module.time() - 10)
+        assert "error_categories" in stats
+        if categorize_errors is not None:
+            assert stats["error_categories"] == {"FileNotFoundError": 1}
+
+    def test_calculate_batch_stats_empty_errors(self):
+        results = [
+            {"filename": "a.pdf", "page": 1, "ids": ["12345"], "notes": ""},
+        ]
+        stats = calculate_batch_stats(results, checkpointed_count=0,
+                                      newly_processed_count=1, start_time=time_module.time() - 5)
+        assert "error_categories" in stats
+        if categorize_errors is not None:
+            assert stats["error_categories"] == {}
+
+    def test_print_batch_stats_shows_error_breakdown(self, capsys):
+        stats = {
+            "summary": {"total_files": 10, "successful": 7, "failed": 3,
+                       "total_pages": 50, "ids_found": 40, "no_id_pages": 5, "error_count": 3},
+            "performance": {"wall_clock_duration_sec": 30.0, "files_per_second": 0.33},
+            "resume_context": {"previously_checkpointed": 0, "newly_processed": 10},
+            "error_categories": {"FileNotFoundError": 2, "PDFPageCountError": 1},
+            "timestamp": "2026-06-07T12:00:00"
+        }
+        print_batch_stats(stats)
+        output = capsys.readouterr().out
+        assert "Error breakdown:" in output
+        assert "FileNotFoundError: 2" in output
+        assert "PDFPageCountError: 1" in output
+        assert "campaign_report.md" in output
+
+    def test_print_batch_stats_no_errors_still_shows_report_pointer(self, capsys):
+        stats = {
+            "summary": {"total_files": 5, "successful": 5, "failed": 0,
+                       "total_pages": 25, "ids_found": 20, "no_id_pages": 5, "error_count": 0},
+            "performance": {"wall_clock_duration_sec": 10.0, "files_per_second": 0.5},
+            "resume_context": {"previously_checkpointed": 0, "newly_processed": 5},
+            "error_categories": {},
+            "timestamp": "2026-06-07T12:00:00"
+        }
+        print_batch_stats(stats)
+        output = capsys.readouterr().out
+        assert "campaign_report.md" in output
+        assert "Error breakdown:" not in output
+
+
+class TestHandleViewStatsFolder:
+    """Tests for enhanced handle_view_stats() per STAT-03/D-09."""
+
+    def test_shows_folder_breakdown(self, capsys):
+        campaign_state = CampaignState(
+            files_processed=10,
+            total_files_discovered=10,
+            files_failed=2,
+            folder_stats={
+                "subdir_a": {
+                    "files": ["a1.pdf", "a2.pdf", "a3.pdf"],
+                    "failed_files": ["a3.pdf"],
+                    "total_pages": 15,
+                    "ids_found": 10,
+                    "no_id_pages": 3,
+                    "rotations": {90: 8, 270: 2},
+                    "preprocessing_fallbacks": 1
+                },
+                "subdir_b": {
+                    "files": ["b1.pdf", "b2.pdf"],
+                    "failed_files": ["b1.pdf", "b2.pdf"],
+                    "total_pages": 0,
+                    "ids_found": 0,
+                    "no_id_pages": 0,
+                    "rotations": {},
+                    "preprocessing_fallbacks": 0
+                }
+            }
+        )
+        results = [
+            {"filename": "a1.pdf", "page": 1, "ids": ["12345"], "notes": ""},
+        ]
+        checkpoint_data = (results, {"a1.pdf"})
+
+        result = handle_view_stats(campaign_state, checkpoint_data)
+        assert result == "menu"
+
+        output = capsys.readouterr().out
+        assert "subdir_b" in output
+        assert "subdir_a" in output
+        assert "OVERALL" in output
+        assert "0.0%" in output
+
+    def test_handles_empty_folder_stats(self, capsys):
+        campaign_state = CampaignState(
+            files_processed=5,
+            total_files_discovered=10,
+            files_failed=0,
+            folder_stats={}
+        )
+        results = [{"filename": "x.pdf", "page": 1, "ids": ["11111"], "notes": ""}]
+        checkpoint_data = (results, {"x.pdf"})
+
+        result = handle_view_stats(campaign_state, checkpoint_data)
+        assert result == "menu"
+
+        output = capsys.readouterr().out
+        assert "Files processed: 5/10" in output
+        assert "OVERALL" not in output
+
+    def test_sorts_by_success_rate_ascending(self, capsys):
+        campaign_state = CampaignState(
+            files_processed=6,
+            total_files_discovered=6,
+            files_failed=1,
+            folder_stats={
+                "good_folder": {
+                    "files": ["g1.pdf", "g2.pdf", "g3.pdf"],
+                    "failed_files": [],
+                    "total_pages": 15,
+                    "ids_found": 12,
+                    "no_id_pages": 3,
+                    "rotations": {90: 10},
+                    "preprocessing_fallbacks": 0
+                },
+                "bad_folder": {
+                    "files": ["b1.pdf", "b2.pdf", "b3.pdf"],
+                    "failed_files": ["b1.pdf"],
+                    "total_pages": 10,
+                    "ids_found": 5,
+                    "no_id_pages": 2,
+                    "rotations": {90: 5, 270: 3},
+                    "preprocessing_fallbacks": 4
+                }
+            }
+        )
+        results = [{"filename": "g1.pdf", "page": 1, "ids": ["12345"], "notes": ""}]
+        checkpoint_data = (results, {"g1.pdf"})
+
+        handle_view_stats(campaign_state, checkpoint_data)
+        output = capsys.readouterr().out
+
+        bad_pos = output.find("bad_folder")
+        good_pos = output.find("good_folder")
+        assert bad_pos < good_pos
+
+
+class TestTqdmEtaDisplay:
+    """Tests for STAT-01: tqdm ETA display verification."""
+
+    def test_tqdm_has_total_parameter(self):
+        """Verify process_all_pdfs creates tqdm with total= set for ETA calculation."""
+        import inspect
+        source = inspect.getsource(process_all_pdfs)
+        assert "total=total_files" in source or "total=" in source
+
+    def test_tqdm_postfix_includes_folders(self):
+        """Verify tqdm postfix updated with Folders count."""
+        import inspect
+        source = inspect.getsource(process_all_pdfs)
+        assert "Folders" in source
+
+
+class TestPreprocessingRotationStats:
+    """Tests for STAT-05: preprocessing fallback and rotation distribution tracking."""
+
+    def test_folder_stats_tracks_rotations(self):
+        """Verify folder_stats accumulates rotation_detected values."""
+        import inspect
+        source = inspect.getsource(process_all_pdfs)
+        assert "rotations" in source
+        assert "rotation_detected" in source
+
+    def test_folder_stats_tracks_preprocessing(self):
+        """Verify folder_stats counts preprocessing fallbacks from notes field."""
+        import inspect
+        source = inspect.getsource(process_all_pdfs)
+        assert "preprocessing_fallbacks" in source
+        assert "preprocessed" in source

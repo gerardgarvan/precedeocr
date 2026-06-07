@@ -17,7 +17,7 @@ import os
 import time as time_module
 import multiprocessing as mp
 from pathlib import Path
-from collections import defaultdict
+from collections import defaultdict, Counter
 from datetime import datetime
 from functools import wraps
 from dataclasses import dataclass, field, asdict
@@ -776,7 +776,7 @@ def filter_remaining_pdfs(pdf_paths: list[Path], processed_files: set[str]) -> l
 
 def calculate_batch_stats(all_results: list[dict], checkpointed_count: int,
                           newly_processed_count: int, start_time: float) -> dict:
-    """Calculate batch statistics per D-13, D-14."""
+    """Calculate batch statistics per D-13, D-14. Enhanced for STAT-02 error breakdown."""
     duration = time_module.time() - start_time
     total_pages = len(all_results)
     ids_found = sum(len(r['ids']) for r in all_results)
@@ -787,6 +787,10 @@ def calculate_batch_stats(all_results: list[dict], checkpointed_count: int,
     successful_files = len(all_filenames - error_filenames)
     total_files = len(all_filenames)
     files_per_sec = newly_processed_count / duration if duration > 0 else 0
+
+    # STAT-02: Error type categorization
+    error_categories = categorize_errors(all_results)
+
     return {
         "summary": {
             "total_files": total_files,
@@ -805,6 +809,7 @@ def calculate_batch_stats(all_results: list[dict], checkpointed_count: int,
             "previously_checkpointed": checkpointed_count,
             "newly_processed": newly_processed_count
         },
+        "error_categories": error_categories,
         "timestamp": datetime.now().isoformat()
     }
 
@@ -829,7 +834,44 @@ def print_batch_stats(stats: dict) -> None:
         print(f"\nResumed from checkpoint:")
         print(f"  Previously done:  {r['previously_checkpointed']} files")
         print(f"  Newly processed:  {r['newly_processed']} files")
+
+    # STAT-02/D-10: Error type breakdown
+    if stats.get('error_categories'):
+        print("\nError breakdown:")
+        for error_type, count in stats['error_categories'].items():
+            print(f"  {error_type}: {count}")
+
+    # D-10: Pointer to full report
+    print(f"\nFull details: campaign_report.md")
     print("=" * 60)
+
+
+def categorize_errors(results: list[dict]) -> dict[str, int]:
+    """Extract and count error types from file-level error results.
+
+    Per STAT-02: Categorizes errors by exception type from notes field.
+    Notes format: "error: ExceptionType: message"
+
+    Args:
+        results: List of result dicts from processing
+
+    Returns:
+        Dict mapping error type name to count, ordered by frequency (most common first)
+    """
+    import re
+    error_pattern = re.compile(r'error:\s*(\w+):')
+    error_counter = Counter()
+
+    for r in results:
+        notes = r.get('notes', '')
+        if r.get('page') == 0 and 'error:' in notes:
+            match = error_pattern.search(notes)
+            if match:
+                error_counter[match.group(1)] += 1
+            else:
+                error_counter['Unknown'] += 1
+
+    return dict(error_counter.most_common())
 
 
 def validate_sequence(results: list[dict]) -> list[dict]:
@@ -1088,6 +1130,17 @@ def process_all_pdfs(pdf_paths: list[Path], workers: int,
     files_since_checkpoint = 0
     stats = {'ids': 0, 'no_id_pages': 0, 'errors': 0}
 
+    # Phase 9 STAT-03/STAT-05: Per-folder statistics accumulation (local, no IPC)
+    folder_stats = defaultdict(lambda: {
+        'total_pages': 0,
+        'files': set(),
+        'failed_files': set(),
+        'ids_found': 0,
+        'no_id_pages': 0,
+        'rotations': Counter(),
+        'preprocessing_fallbacks': 0
+    })
+
     # Calculate total for progress bar (remaining + already done)
     total_files = len(pdf_paths) + len(checkpointed_results)
 
@@ -1135,6 +1188,28 @@ def process_all_pdfs(pdf_paths: list[Path], workers: int,
                         else:
                             stats['no_id_pages'] += 1
 
+                    # Phase 9: Accumulate per-folder stats
+                    if file_results:
+                        folder_path = file_results[0].get('folder_path', '')
+                        filename = file_results[0]['filename']
+                        folder_stats[folder_path]['files'].add(filename)
+
+                        # File-level error detection
+                        if file_results[0]['page'] == 0 and 'error:' in file_results[0].get('notes', ''):
+                            folder_stats[folder_path]['failed_files'].add(filename)
+
+                        # Page-level stats
+                        for r in file_results:
+                            folder_stats[folder_path]['total_pages'] += 1
+                            if r['ids']:
+                                folder_stats[folder_path]['ids_found'] += len(r['ids'])
+                            elif r['page'] > 0 and 'error:' not in r.get('notes', ''):
+                                folder_stats[folder_path]['no_id_pages'] += 1
+                            if r.get('rotation_detected') is not None:
+                                folder_stats[folder_path]['rotations'][r['rotation_detected']] += 1
+                            if 'preprocessed' in r.get('notes', ''):
+                                folder_stats[folder_path]['preprocessing_fallbacks'] += 1
+
                     # Periodic checkpoint save (per D-03: every checkpoint_frequency files)
                     if checkpoint_path and files_since_checkpoint >= checkpoint_frequency:
                         save_checkpoint_atomic(
@@ -1155,7 +1230,8 @@ def process_all_pdfs(pdf_paths: list[Path], workers: int,
                     pbar.set_postfix({
                         'IDs': stats['ids'],
                         'No-ID': stats['no_id_pages'],
-                        'Errors': stats['errors']
+                        'Errors': stats['errors'],
+                        'Folders': len(folder_stats)
                     })
 
             finally:
@@ -1203,6 +1279,22 @@ def process_all_pdfs(pdf_paths: list[Path], workers: int,
     finally:
         # Restore original signal handler (important for tests and nested calls)
         signal.signal(signal.SIGINT, original_sigint)
+
+    # Phase 9: Persist folder stats to campaign state for report generation
+    if campaign_state is not None:
+        # Convert sets to lists for JSON serialization
+        campaign_state.folder_stats = {
+            folder: {
+                'total_pages': fs['total_pages'],
+                'files': list(fs['files']),
+                'failed_files': list(fs['failed_files']),
+                'ids_found': fs['ids_found'],
+                'no_id_pages': fs['no_id_pages'],
+                'rotations': dict(fs['rotations']),
+                'preprocessing_fallbacks': fs['preprocessing_fallbacks']
+            }
+            for folder, fs in folder_stats.items()
+        }
 
     return all_results
 
