@@ -1263,7 +1263,7 @@ class TestCheckpointIntegration:
         assert 'summary' in stats
 
     def test_main_resumes_from_checkpoint(self, tmp_path):
-        """main() loads checkpoint and only processes remaining files."""
+        """main() loads checkpoint, shows menu (Phase 8), and processes remaining files on 'continue'."""
         # Create checkpoint with 2 processed files
         checkpoint_data = {
             "metadata": {
@@ -1286,7 +1286,9 @@ class TestCheckpointIntegration:
         for name in ['file1.pdf', 'file2.pdf', 'file3.pdf']:
             (tmp_path / name).write_bytes(b'dummy')
 
-        with patch('precede_ocr.discover_pdfs', return_value=[tmp_path / 'file1.pdf', tmp_path / 'file2.pdf', tmp_path / 'file3.pdf']):
+        # Phase 8: Menu now appears when checkpoint exists; mock it to return 'continue'
+        with patch('precede_ocr.discover_pdfs', return_value=[tmp_path / 'file1.pdf', tmp_path / 'file2.pdf', tmp_path / 'file3.pdf']), \
+             patch('precede_ocr.run_menu_loop', return_value='continue'):
             with patch('precede_ocr.process_all_pdfs') as mock_proc_all:
                 mock_proc_all.return_value = checkpoint_data['results'] + [{'filename': 'file3.pdf', 'page': 1, 'ids': ['33333'], 'rotation_detected': 90, 'notes': ''}]
 
@@ -2703,14 +2705,15 @@ class TestMenuIntegration:
 
     def test_main_fresh_rediscovers_pdfs(self, tmp_path):
         """main() with menu returning 'fresh' rediscovers PDFs and processes."""
-        # Create checkpoint file
+        # Create checkpoint file (needed for checkpoint_path.exists() check in main)
+        checkpoint_path = tmp_path / 'output' / '.checkpoint.json'
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint_results = [{'filename': 'test.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': '', 'folder_path': ''}]
         checkpoint = {
-            'results': [{'filename': 'test.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': '', 'folder_path': ''}],
+            'results': checkpoint_results,
             'processed_files': ['test.pdf'],
             'metadata': {'input_path': str(tmp_path), 'checkpoint_frequency': 50, 'version': '1.0'}
         }
-        checkpoint_path = tmp_path / 'output' / '.checkpoint.json'
-        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         checkpoint_path.write_text(json.dumps(checkpoint))
 
         campaign_state_data = {
@@ -2722,17 +2725,23 @@ class TestMenuIntegration:
         }
         (tmp_path / 'output' / 'campaign_state.json').write_text(json.dumps(campaign_state_data))
 
-        dummy_pdf = tmp_path / 'test.pdf'
-        dummy_pdf.write_bytes(b'%PDF-1.4 dummy')
+        # Use 2 PDFs so main() uses parallel processing path (not single-file path)
+        dummy_pdf_1 = tmp_path / 'test.pdf'
+        dummy_pdf_1.write_bytes(b'%PDF-1.4 dummy')
+        dummy_pdf_2 = tmp_path / 'test2.pdf'
+        dummy_pdf_2.write_bytes(b'%PDF-1.4 dummy2')
 
         discover_calls = []
 
         def mock_discover(path):
             discover_calls.append(path)
-            return [dummy_pdf]
+            return [dummy_pdf_1, dummy_pdf_2]
+
+        mock_checkpoint_data = (checkpoint_results, {'test.pdf'})
 
         with patch('precede_ocr.run_menu_loop', return_value='fresh'), \
              patch('precede_ocr.discover_pdfs', side_effect=mock_discover), \
+             patch('precede_ocr.load_checkpoint_if_exists', return_value=mock_checkpoint_data), \
              patch('precede_ocr.process_all_pdfs', return_value=[]) as mock_process, \
              patch('precede_ocr.validate_sequence', side_effect=lambda x: x), \
              patch('precede_ocr.write_results_csv'), \

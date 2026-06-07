@@ -1331,13 +1331,140 @@ def handle_quit() -> str:
     return 'quit'
 
 
+def handle_continue() -> str:
+    """Handle continue menu option.
+
+    Returns:
+        'continue' to signal resume processing
+    """
+    print("Continuing processing...")
+    return 'continue'
+
+
+def get_failed_filenames(checkpointed_results: list[dict]) -> set[str]:
+    """Extract filenames of files that failed at the file level.
+
+    Per D-05: Failed means page==0 and notes starting with 'error:'.
+    Page-level errors (page>0) are not file-level failures.
+
+    Args:
+        checkpointed_results: List of result dicts from checkpoint
+
+    Returns:
+        Set of filenames that had file-level errors
+    """
+    return {
+        r['filename'] for r in checkpointed_results
+        if r.get('page') == 0 and r.get('notes', '').startswith('error:')
+    }
+
+
+def handle_rerun_failures(campaign_state: CampaignState,
+                          checkpoint_data: tuple[list[dict], set[str]],
+                          output_dir: Path,
+                          output_csv: str, output_json: str,
+                          workers: int, checkpoint_frequency: int) -> str:
+    """Re-run only previously failed files and merge results.
+
+    Per D-05: Identifies failed files by page==0 + notes.startswith('error:').
+    Per D-06: Removes old error entries before reprocessing.
+    Per D-07: Auto-writes CSV/JSON after re-run completes.
+
+    Args:
+        campaign_state: CampaignState with campaign metadata
+        checkpoint_data: Tuple of (results_list, processed_files_set)
+        output_dir: Output directory path
+        output_csv: Path to output CSV file
+        output_json: Path to output JSON file
+        workers: Number of parallel workers
+        checkpoint_frequency: Checkpoint save frequency
+
+    Returns:
+        'menu' if no failures found, 'rerun' after successful re-run
+    """
+    checkpointed_results, processed_files = checkpoint_data
+
+    # Identify failed files (D-05)
+    failed_filenames = get_failed_filenames(checkpointed_results)
+
+    if not failed_filenames:
+        print("No failed files to re-run.")
+        return 'menu'
+
+    # Remove old error entries before reprocessing (D-06)
+    clean_results = [r for r in checkpointed_results if r['filename'] not in failed_filenames]
+
+    # Rediscover failed file paths
+    all_pdfs = discover_pdfs(campaign_state.input_path)
+    failed_pdfs = [p for p in all_pdfs if p.name in failed_filenames]
+
+    print(f"Re-running {len(failed_pdfs)} failed files...")
+
+    # Set up checkpoint path
+    checkpoint_path = output_dir / '.checkpoint.json'
+
+    # Process only the failed files with clean results as base
+    new_results = process_all_pdfs(
+        failed_pdfs, workers=workers,
+        checkpointed_results=clean_results,
+        checkpoint_path=checkpoint_path,
+        input_path=campaign_state.input_path,
+        checkpoint_frequency=checkpoint_frequency,
+        campaign_state=campaign_state,
+        output_dir=output_dir
+    )
+
+    # Validate and write final output (D-07)
+    validated_results = validate_sequence(new_results)
+    write_results_csv(validated_results, output_csv)
+    write_results_json(validated_results, output_json)
+    print_rotation_summary(validated_results)
+
+    # Finalize campaign state
+    campaign_state.status = 'completed'
+    campaign_state.completed_at = datetime.now().isoformat()
+    save_campaign_state_atomic(campaign_state, output_dir)
+
+    print("Re-run complete.")
+    return 'rerun'
+
+
+def handle_fresh_start(output_dir: Path) -> str:
+    """Clear all checkpoint and campaign state files for a fresh start.
+
+    Per D-04: Deletes checkpoint, campaign state, and error log.
+
+    Args:
+        output_dir: Output directory containing state files
+
+    Returns:
+        'fresh' to signal fresh start
+    """
+    checkpoint_path = output_dir / '.checkpoint.json'
+    campaign_state_path = output_dir / 'campaign_state.json'
+    error_log_path = output_dir / 'errors.log'
+
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
+    if campaign_state_path.exists():
+        campaign_state_path.unlink()
+    if error_log_path.exists():
+        error_log_path.unlink()
+
+    print("Cleared checkpoint, campaign state, and error log.")
+    return 'fresh'
+
+
 def run_menu_loop(campaign_state: CampaignState,
                   checkpoint_data: tuple[list[dict], set[str]],
                   all_pdf_count: int,
-                  output_csv: str, output_json: str) -> str:
+                  output_csv: str, output_json: str,
+                  output_dir: Path = None,
+                  workers: int = 1,
+                  checkpoint_frequency: int = 50) -> str:
     """Run the interactive menu loop, dispatching to handlers.
 
-    Choices 1, 2, 5 return action strings for the caller to handle.
+    Choices 1, 2, 5 are handled by pipeline-integrated handlers.
     Choices 3, 4, 6 are handled internally (view stats, export, quit).
     Loop continues when handler returns 'menu'.
 
@@ -1347,25 +1474,28 @@ def run_menu_loop(campaign_state: CampaignState,
         all_pdf_count: Total PDFs discovered
         output_csv: Path to output CSV
         output_json: Path to output JSON
+        output_dir: Output directory path (for rerun/fresh handlers)
+        workers: Number of parallel workers (for rerun handler)
+        checkpoint_frequency: Checkpoint save frequency (for rerun handler)
 
     Returns:
         str: 'continue', 'rerun', 'fresh', or 'quit'
     """
-    # Direct action mapping (choices that exit the menu immediately)
-    direct_actions = {1: 'continue', 2: 'rerun', 5: 'fresh'}
-
-    # Handler dispatch mapping (choices that run a handler)
+    # Handler dispatch mapping
     handlers = {
+        1: lambda: handle_continue(),
+        2: lambda: handle_rerun_failures(
+            campaign_state, checkpoint_data, output_dir,
+            output_csv, output_json, workers, checkpoint_frequency
+        ),
         3: lambda: handle_view_stats(campaign_state, checkpoint_data),
         4: lambda: handle_export_partial(checkpoint_data, output_csv, output_json),
+        5: lambda: handle_fresh_start(output_dir),
         6: lambda: handle_quit(),
     }
 
     while True:
         choice = show_campaign_menu(campaign_state, checkpoint_data, all_pdf_count)
-
-        if choice in direct_actions:
-            return direct_actions[choice]
 
         if choice in handlers:
             result = handlers[choice]()
@@ -1437,10 +1567,67 @@ def main(input_path: str, output_csv: str, output_json: str | None = None,
     if output_json is None:
         output_json = str(Path(output_csv).with_suffix('.json'))
 
-    # D-05: Auto-detect checkpoint for resume
+    # Phase 8: Interactive campaign menu (D-08, D-09)
     checkpointed_results = []
     processed_files = set()
-    if not fresh:
+    menu_handled = False
+
+    if not fresh and checkpoint_path.exists():
+        checkpoint_data = load_checkpoint_if_exists(output_dir, input_path)
+        if checkpoint_data:
+            checkpointed_results, processed_files = checkpoint_data
+
+            # Determine workers before menu (needed for rerun)
+            menu_workers = workers if workers is not None else max(1, mp.cpu_count() - 1)
+
+            action = run_menu_loop(
+                campaign_state, checkpoint_data, len(pdf_paths),
+                output_csv, output_json, output_dir,
+                menu_workers, _CHECKPOINT_FREQUENCY
+            )
+            menu_handled = True
+
+            if action == 'quit':
+                return
+            elif action == 'rerun':
+                # Re-run handler already wrote outputs and finalized state
+                return
+            elif action == 'fresh':
+                # State already cleared by handler, rediscover all files
+                pdf_paths = discover_pdfs(input_path)
+                if not pdf_paths:
+                    print(f"No PDF files found in {input_path}")
+                    return
+                print(f"Found {len(pdf_paths)} PDF file(s)")
+                # Recreate campaign state for fresh run
+                campaign_state = load_or_create_campaign_state(output_dir, input_path, cli_options)
+                campaign_state.total_files_discovered = len(pdf_paths)
+                campaign_state.status = 'running'
+                # Reset checkpoint data so normal flow starts fresh
+                checkpointed_results = []
+                processed_files = set()
+                # Fall through to normal processing below
+            elif action == 'continue':
+                # Filter remaining PDFs and fall through to normal processing
+                pdf_paths = filter_remaining_pdfs(pdf_paths, processed_files)
+                if not pdf_paths:
+                    # All files already processed (edge case -- 100% complete, user chose continue anyway)
+                    print("All files already processed. Use --fresh to reprocess.")
+                    all_results = checkpointed_results
+                    campaign_state.status = 'completed'
+                    campaign_state.completed_at = datetime.now().isoformat()
+                    campaign_state.files_processed = len(set(r['filename'] for r in all_results))
+                    save_campaign_state_atomic(campaign_state, output_dir)
+                    all_results = validate_sequence(all_results)
+                    write_results_csv(all_results, output_csv)
+                    write_results_json(all_results, output_json)
+                    print_rotation_summary(all_results)
+                    print("Done.")
+                    return
+                # Fall through to normal processing with filtered pdfs
+
+    # D-05: Auto-detect checkpoint for resume (non-menu path)
+    if not menu_handled and not fresh:
         checkpoint_data = load_checkpoint_if_exists(output_dir, input_path)
         if checkpoint_data:
             checkpointed_results, processed_files = checkpoint_data
