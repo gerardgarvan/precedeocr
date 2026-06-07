@@ -2,7 +2,7 @@
 
 ## What This Is
 
-A batch OCR pipeline that scans ~30,429 multi-page PDF files containing scanned/photographed images, extracts 5-digit numeric "Precede" IDs from each page, and produces structured output (CSV + JSON) mapping every ID to its source file and page number. The IDs are typically rotated ~90 degrees on the page and appear below the word "Precede" in cursive.
+A batch OCR pipeline that scans ~30,429 multi-page PDF files containing scanned/photographed images, extracts 5-digit numeric "Precede" IDs from each page, and produces structured output (CSV + JSON) mapping every ID to its source file and page number. Includes campaign management: interactive resume menu, graceful shutdown, per-folder quality statistics, and auto-generated reports.
 
 ## Core Value
 
@@ -10,15 +10,18 @@ Reliably extract every Precede ID from every page across 30K+ PDFs so the user c
 
 ## Current State
 
-Shipped v1.0 with 2,790 LOC Python (1,101 pipeline + 1,689 tests).
-Phase 6 complete — campaign state infrastructure with atomic writes, silent v1.0 upgrade, folder_path tracking in output files.
-Phase 7 complete — graceful Ctrl+C shutdown with worker protection, campaign state interruption tracking, and clean terminal exit. Verified on Windows 10 with 32K PDF corpus.
-Phase 8 complete — interactive campaign menu with 6 options (continue, re-run failures, view stats, export partial, fresh start, quit), input validation, and full main() integration.
-Phase 9 complete — per-folder statistics & reporting with error categorization, folder quality breakdown, condensed console view (top 10 worst), and auto-generated campaign_report.md with problem highlighting and recommendations.
-Tech stack: Python 3, pytesseract, pdf2image/Poppler, OpenCV, Pillow, pandas, scipy.
+Shipped v1.1 Campaign Runner — 5,471 LOC Python (2,151 pipeline + 3,320 tests).
 230 tests passing. 94.9% baseline OCR accuracy on test corpus.
+Tech stack: Python 3, pytesseract, pdf2image/Poppler, OpenCV, Pillow, pandas, scipy.
 
 CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N --debug --fresh`
+
+**Campaign features (v1.1):**
+- Interactive 6-option resume menu (continue, re-run failures, view stats, export partial, fresh start, quit)
+- Graceful Ctrl+C shutdown with worker protection and clean state persistence
+- Per-folder quality statistics with condensed console view (top 10 worst folders)
+- Auto-generated campaign_report.md with problem highlighting and recommendations
+- Error categorization and rotation/preprocessing distribution tracking
 
 ## Requirements
 
@@ -38,24 +41,14 @@ CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N
 - ✓ Checkpoint/resume capability to continue after crash or interruption — v1.0
 - ✓ Preprocess low-quality scans (grayscale, threshold, denoise) as fallback — v1.0
 - ✓ Handle OCR near-misses (O/0, I/1, S/5 confusion) with normalization — v1.0
+- ✓ Interactive campaign menu on start/resume — v1.1
+- ✓ Graceful Ctrl+C handling (finishes current files, saves state cleanly) — v1.1
+- ✓ Comprehensive statistics: completion progress, quality metrics, per-folder breakdown — v1.1
+- ✓ Per-directory status tracking to identify problem areas — v1.1
 
 ### Active
 
-- [x] Interactive campaign menu on start/resume (continue, re-run failures, view stats, export partial results) — Phase 8
-- [x] Graceful Ctrl+C handling (finishes current files, saves state cleanly) — Phase 7
-- [x] Comprehensive statistics: completion progress, quality metrics, per-folder breakdown — Phase 9
-- [x] Per-directory status tracking to identify problem areas — Phase 9
 - [ ] Real-world validation and hardening at full scale (30K+ PDFs)
-
-## Current Milestone: v1.1 Campaign Runner
-
-**Goal:** Add campaign management so the OCR pipeline can be run, stopped, and resumed smoothly at full scale with interactive status and per-folder statistics.
-
-**Target features:**
-- Interactive campaign menu on start/resume
-- Graceful Ctrl+C handling
-- Comprehensive statistics with per-folder breakdown
-- Real-world validation and hardening at scale
 
 ### Out of Scope
 
@@ -98,6 +91,7 @@ CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N
 | Stdlib-only menu (input, not questionary) | Avoid external deps and Windows terminal compat issues; menu shown when workers idle | ✓ Good — zero dependencies, cross-platform |
 | Local stats aggregation, not Manager | Avoids 10-100x IPC overhead; folder_stats accumulated in main process from worker results | ✓ Good — zero overhead, clean data flow |
 | F-string templates for report (not pandas.to_markdown) | Full control over highlighting, no tabulate version upgrade needed | ✓ Good — custom formatting with problem folder emphasis |
+| multiprocessing.Event for cooperative shutdown | Workers check event flag, not killed by signal; prevents mid-OCR corruption | ✓ Good — clean shutdown on Windows |
 | Theil-Sen robust regression for sequence validation | OLS too sensitive to outliers; Theil-Sen + modified Z-score more reliable | ✓ Good — corrected from initial OLS approach in Phase 5 gap closure |
 | PSM 6 for Tesseract | Middle ground for full-page scans with isolated IDs | ✓ Good — better than PSM 7 (too restrictive) or PSM 3 (too broad) |
 | Memory-safe pdf2image (output_folder + paths_only) | Prevents OOM on multi-page PDFs | ✓ Good — critical for large corpus processing |
@@ -120,4 +114,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-07 after Phase 9 completion*
+*Last updated: 2026-06-07 after v1.1 milestone*

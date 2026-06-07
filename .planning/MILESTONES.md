@@ -1,5 +1,23 @@
 # Milestones
 
+## v1.1 Campaign Runner (Shipped: 2026-06-07)
+
+**Phases completed:** 4 phases, 9 plans, 13 tasks
+
+**Key accomplishments:**
+
+- CampaignState dataclass with atomic save/load, silent v1.0 checkpoint upgrade, and folder path normalization using Path.resolve()
+- Campaign state fully wired into main() and process_all_pdfs() with folder_path injection in all result dicts
+- CSV and JSON output now include folder_path from result dicts, enabling downstream Phase 9 statistics and closing STATE-02 gap
+- multiprocessing.Event-based cooperative shutdown with signal handler, worker SIGINT protection, tqdm cleanup, and campaign state interruption tracking
+- All 5 graceful shutdown tests passed on Windows 10 with real Ctrl+C signals against 32K PDF corpus
+- Stdlib input()-based campaign menu with 6 options, validation loop, view-stats/export-partial/quit handlers, and dictionary-dispatch menu loop
+- Continue/rerun-failures/fresh-start handlers wired into main() with full action routing, error identification by page==0+error: prefix, and auto-write outputs after re-run
+- One-liner:
+- One-liner:
+
+---
+
 ## v1.0 PDF ID Scanner & Mapper (Shipped: 2026-06-05)
 
 **Phases completed:** 5 phases, 10 plans, 10 tasks
