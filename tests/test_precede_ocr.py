@@ -2192,3 +2192,64 @@ class TestGracefulShutdown:
             mock_pbar.close.assert_called()
         finally:
             precede_ocr._SHUTDOWN_EVENT = old_event
+
+
+# -- Menu functions tests (Phase 8, Plan 01 TDD RED) --
+
+from precede_ocr import (
+    show_campaign_menu,
+    handle_view_stats,
+    handle_export_partial,
+    handle_quit,
+    run_menu_loop,
+)
+
+
+def _make_campaign_state(**overrides):
+    defaults = dict(
+        campaign_id="campaign_20260606_120000",
+        status="interrupted",
+        files_processed=100,
+        total_files_discovered=200,
+        files_failed=5,
+        input_path="/test/input",
+    )
+    defaults.update(overrides)
+    return CampaignState(**defaults)
+
+
+def _make_checkpoint_data(n_results=10, n_failed=2):
+    results = []
+    for i in range(n_results - n_failed):
+        results.append({
+            'filename': f'file_{i}.pdf', 'page': 1, 'ids': [f'{10000+i}'],
+            'rotation_detected': 90, 'notes': '', 'folder_path': ''
+        })
+    for i in range(n_failed):
+        results.append({
+            'filename': f'failed_{i}.pdf', 'page': 0, 'ids': [],
+            'rotation_detected': None,
+            'notes': 'error: TestError: something went wrong', 'folder_path': ''
+        })
+    processed = {r['filename'] for r in results}
+    return (results, processed)
+
+
+class TestMenuRedPhase:
+    """Minimal TDD RED tests to verify menu functions exist and work."""
+
+    def test_show_menu_valid_input(self, monkeypatch):
+        monkeypatch.setattr('builtins.input', lambda _: "3")
+        state = _make_campaign_state()
+        cp = _make_checkpoint_data()
+        result = show_campaign_menu(state, cp, 200)
+        assert result == 3
+
+    def test_handle_quit_returns_quit(self):
+        assert handle_quit() == 'quit'
+
+    def test_handle_view_stats_returns_menu(self, capsys):
+        state = _make_campaign_state()
+        cp = _make_checkpoint_data()
+        result = handle_view_stats(state, cp)
+        assert result == 'menu'

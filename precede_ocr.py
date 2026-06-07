@@ -1207,6 +1207,173 @@ def process_all_pdfs(pdf_paths: list[Path], workers: int,
     return all_results
 
 
+def show_campaign_menu(campaign_state: CampaignState,
+                       checkpoint_data: tuple[list[dict], set[str]],
+                       all_pdf_count: int) -> int:
+    """Display campaign status and numbered menu, validate input, return choice.
+
+    Per D-01: Shows campaign ID, status, progress, failed count.
+    Per D-02: Numbered options [1]-[6].
+    Per D-03: Re-prompt loop on invalid input.
+    Per D-10: Shows 'all files processed' when 100% complete.
+
+    Args:
+        campaign_state: CampaignState with campaign metadata
+        checkpoint_data: Tuple of (results_list, processed_files_set)
+        all_pdf_count: Total PDFs discovered (for completion check)
+
+    Returns:
+        int: User's menu choice (1-6)
+    """
+    _, processed_files = checkpoint_data
+
+    # Print status header (D-01)
+    print(f"\nCampaign: {campaign_state.campaign_id}")
+    print(f"Status: {campaign_state.status}")
+    print(f"Progress: {campaign_state.files_processed}/{campaign_state.total_files_discovered} files")
+    print(f"Failed: {campaign_state.files_failed} files")
+    print()
+
+    # Build menu options (D-02)
+    # D-10: If 100% complete, show indicator on Continue
+    if len(processed_files) >= all_pdf_count:
+        option_1 = "[1] Continue processing  (all files processed)"
+    else:
+        option_1 = "[1] Continue processing"
+
+    # Discretion: Show failed count next to Re-run failures for quick visibility
+    if campaign_state.files_failed > 0:
+        option_2 = f"[2] Re-run failures ({campaign_state.files_failed} failed)"
+    else:
+        option_2 = "[2] Re-run failures"
+
+    print(option_1)
+    print(option_2)
+    print("[3] View stats")
+    print("[4] Export partial results")
+    print("[5] Fresh start")
+    print("[6] Quit")
+    print()
+
+    # Input validation loop (D-03)
+    while True:
+        try:
+            raw = input("Enter choice (1-6): ")
+            choice = int(raw)
+            if 1 <= choice <= 6:
+                return choice
+            print("Invalid choice. Enter 1-6:")
+        except ValueError:
+            print("Invalid choice. Enter 1-6:")
+        except (EOFError, KeyboardInterrupt):
+            print("\nExiting.")
+            sys.exit(0)
+
+
+def handle_view_stats(campaign_state: CampaignState,
+                      checkpoint_data: tuple[list[dict], set[str]]) -> str:
+    """Display campaign statistics and return to menu.
+
+    Per D-04: Shows files done/total, failed count, IDs found.
+
+    Args:
+        campaign_state: CampaignState with campaign metadata
+        checkpoint_data: Tuple of (results_list, processed_files_set)
+
+    Returns:
+        'menu' to signal return to menu loop
+    """
+    results, _ = checkpoint_data
+
+    ids_count = sum(len(r['ids']) for r in results if r.get('ids'))
+    error_count = sum(
+        1 for r in results
+        if r.get('page') == 0 and r.get('notes', '').startswith('error:')
+    )
+
+    print(f"\nFiles processed: {campaign_state.files_processed}/{campaign_state.total_files_discovered}")
+    print(f"Failed: {campaign_state.files_failed}")
+    print(f"IDs found: {ids_count}")
+
+    return 'menu'
+
+
+def handle_export_partial(checkpoint_data: tuple[list[dict], set[str]],
+                          output_csv: str, output_json: str) -> str:
+    """Export partial results to CSV and JSON without sequence validation.
+
+    Per D-11: Reuses existing write_results_csv and write_results_json.
+    Per D-12: Prints confirmation message after export.
+    Per D-13: Does NOT call validate_sequence (partial data has gaps).
+
+    Args:
+        checkpoint_data: Tuple of (results_list, processed_files_set)
+        output_csv: Path to output CSV file
+        output_json: Path to output JSON file
+
+    Returns:
+        'menu' to signal return to menu loop
+    """
+    results, _ = checkpoint_data
+    write_results_csv(results, output_csv)
+    write_results_json(results, output_json)
+    print(f"Exported {len(results)} results to {output_csv}")
+    return 'menu'
+
+
+def handle_quit() -> str:
+    """Handle quit menu option.
+
+    Returns:
+        'quit' to signal exit from menu loop
+    """
+    print("Exiting.")
+    return 'quit'
+
+
+def run_menu_loop(campaign_state: CampaignState,
+                  checkpoint_data: tuple[list[dict], set[str]],
+                  all_pdf_count: int,
+                  output_csv: str, output_json: str) -> str:
+    """Run the interactive menu loop, dispatching to handlers.
+
+    Choices 1, 2, 5 return action strings for the caller to handle.
+    Choices 3, 4, 6 are handled internally (view stats, export, quit).
+    Loop continues when handler returns 'menu'.
+
+    Args:
+        campaign_state: CampaignState with campaign metadata
+        checkpoint_data: Tuple of (results_list, processed_files_set)
+        all_pdf_count: Total PDFs discovered
+        output_csv: Path to output CSV
+        output_json: Path to output JSON
+
+    Returns:
+        str: 'continue', 'rerun', 'fresh', or 'quit'
+    """
+    # Direct action mapping (choices that exit the menu immediately)
+    direct_actions = {1: 'continue', 2: 'rerun', 5: 'fresh'}
+
+    # Handler dispatch mapping (choices that run a handler)
+    handlers = {
+        3: lambda: handle_view_stats(campaign_state, checkpoint_data),
+        4: lambda: handle_export_partial(checkpoint_data, output_csv, output_json),
+        6: lambda: handle_quit(),
+    }
+
+    while True:
+        choice = show_campaign_menu(campaign_state, checkpoint_data, all_pdf_count)
+
+        if choice in direct_actions:
+            return direct_actions[choice]
+
+        if choice in handlers:
+            result = handlers[choice]()
+            if result != 'menu':
+                return result
+            # result == 'menu' -> loop continues
+
+
 def main(input_path: str, output_csv: str, output_json: str | None = None,
          workers: int | None = None, debug: bool = False, fresh: bool = False) -> None:
     """
