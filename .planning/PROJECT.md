@@ -23,6 +23,17 @@ CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N
 - Auto-generated campaign_report.md with problem highlighting and recommendations
 - Error categorization and rotation/preprocessing distribution tracking
 
+## Current Milestone: v1.2 Performance Optimization
+
+**Goal:** Dramatically reduce total processing time for the 30K+ PDF corpus by cutting per-page OCR latency and maximizing throughput across 20 cores.
+
+**Target features:**
+- Switch PDF rendering from pdf2image/Poppler to PyMuPDF (faster rasterization)
+- Optimize Tesseract configuration (character whitelist, optimal PSM/OEM for digits)
+- Smarter rotation strategy (reduce unnecessary OCR passes per page)
+- Tune parallelism for hybrid CPU (core-aware worker allocation)
+- Profile-guided optimizations (identify actual bottlenecks with timing data)
+
 ## Requirements
 
 ### Validated
@@ -48,7 +59,11 @@ CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N
 
 ### Active
 
-- [ ] Real-world validation and hardening at full scale (30K+ PDFs)
+- [ ] Switch PDF rendering to PyMuPDF for faster rasterization
+- [ ] Optimize Tesseract configuration for digit-only extraction
+- [ ] Reduce per-page OCR passes with smarter rotation strategy
+- [ ] Tune parallel worker allocation for hybrid CPU architecture
+- [ ] Profile and optimize end-to-end pipeline throughput
 
 ### Out of Scope
 
@@ -114,4 +129,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-07 after v1.1 milestone*
+*Last updated: 2026-06-07 after v1.2 milestone started*

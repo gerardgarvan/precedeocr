@@ -1,71 +1,35 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.1
-milestone_name: milestone
-status: v1.1 milestone complete
-last_updated: "2026-06-07T21:07:42.397Z"
+milestone: v1.2
+milestone_name: Performance Optimization
+status: defining requirements
+last_updated: "2026-06-07"
 progress:
-  total_phases: 4
-  completed_phases: 4
-  total_plans: 9
-  completed_plans: 9
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
 ---
 
 # Project State: Precede OCR
 
-**Milestone:** v1.1 Campaign Runner
-**Last updated:** 2026-06-05
+**Milestone:** v1.2 Performance Optimization
+**Last updated:** 2026-06-07
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-06-05)
+See: .planning/PROJECT.md (updated 2026-06-07)
 
 **Core Value**: Reliably extract every Precede ID from every page across 30K+ PDFs so the user can look up which file and page any given ID lives in.
 
-**Current focus**: v1.1 Campaign Runner - Add campaign management so the OCR pipeline can be run, stopped, and resumed smoothly at full scale with interactive status and per-folder statistics.
+**Current focus**: v1.2 Performance Optimization - Dramatically reduce total processing time by cutting per-page OCR latency and maximizing throughput across 20 cores.
 
 ## Current Position
 
-Phase: 09
-Plan: Not started
-**Phase**: Phase 6 - Enhanced Campaign State Schema
-
-**Plan**: Not yet created
-
-**Status**: Not started
-
-**Progress**:
-
-```
-Phase 6: Enhanced Campaign State Schema
-[                                        ] 0% complete
-Plans: 0/0 | Tasks: 0/0
-```
-
-## Performance Metrics
-
-### v1.1 Progress
-
-**Phases**: 0/4 complete (0%)
-
-- Phase 6: Not started
-- Phase 7: Not started
-- Phase 8: Not started
-- Phase 9: Not started
-
-**Plans**: 0 created, 0 complete
-
-**Tasks**: 0 created, 0 complete
-
-### Cumulative (All Milestones)
-
-**Milestones**: 1 shipped (v1.0), 1 active (v1.1)
-
-**Total phases**: 5 complete (v1.0), 4 pending (v1.1)
-
-**Total plans**: 10 complete (v1.0), 0 created (v1.1)
-
-**Total tasks**: 10 complete (v1.0), 0 created (v1.1)
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-06-07 — Milestone v1.2 started
 
 ## Accumulated Context
 
@@ -73,49 +37,40 @@ Plans: 0/0 | Tasks: 0/0
 
 | Decision | Phase | Rationale |
 |----------|-------|-----------|
-| Campaign state separate from checkpoint | Phase 6 (planned) | campaign_state.json stores metadata (status, folder stats, interruption log); .checkpoint.json stores granular results; both updated atomically |
-| Event-based shutdown, not signal-only | Phase 7 (planned) | Signals don't propagate reliably to child processes on Windows; multiprocessing.Event is cross-platform IPC mechanism |
-| Stdlib-only menu (input, not questionary) | Phase 8 (planned) | Use input() for menus to avoid external dependencies and Windows terminal compatibility issues; menu shown only when workers idle |
-| Local stats aggregation, not Manager | Phase 9 (planned) | Workers return results to main process, main aggregates; avoids Manager IPC bottleneck (10-100x overhead) |
-| Phase 06 P01 | 228 | 1 tasks | 2 files |
-| Phase 06 P02 | 4 | 2 tasks | 2 files |
-| Phase 06 P03 | 4 | 1 tasks | 3 files |
-| Phase 07 P01 | 5min | 2 tasks | 2 files |
-| Phase 08 P01 | 5min | 2 tasks | 2 files |
-| Phase 08 P02 | 5min | 2 tasks | 2 files |
-| Phase 09 P01 | 7 | 3 tasks | 2 files |
-| Phase 09 P02 | 6 | 2 tasks | 2 files |
+| Switch to PyMuPDF from pdf2image/Poppler | v1.2 (planned) | User approved dependency change; PyMuPDF significantly faster for PDF rasterization |
+| Optimize for hybrid CPU (8P+12E cores) | v1.2 (planned) | User's hardware has 20 threads; need core-aware worker allocation |
 
 ### Active TODOs
 
-None yet. Phase 6 planning will generate initial task list.
+None yet. Requirements definition in progress.
 
 ### Known Blockers
 
-None identified. Research complete, all dependencies validated in v1.0.
+None identified.
 
 ### Recent Completions
 
-**v1.0 milestone shipped (2026-06-05):**
+**v1.1 Campaign Runner shipped (2026-06-07):**
 
-- Phase 5: Theil-Sen Robust Sequence Validation completed
-- 141 tests passing, 94.9% baseline OCR accuracy
-- 2,790 LOC Python (1,101 pipeline + 1,689 tests)
-- Full checkpoint/resume, parallel processing, multi-rotation OCR, preprocessing fallback
+- Interactive 6-option resume menu
+- Graceful Ctrl+C shutdown with worker protection
+- Per-folder quality statistics with console view
+- Auto-generated campaign reports
+- 230 tests passing, 5,471 LOC
 
 ## Session Continuity
 
-**Last activity**: Roadmap creation for v1.1 milestone (2026-06-05)
+**Last activity**: Milestone v1.2 initialization (2026-06-07)
 
-**Next action**: `/gsd:plan-phase 6` to decompose Phase 6 into executable plans
+**Next action**: Define requirements and create roadmap
 
 ### Context for Next Session
 
-- v1.1 requirements defined (15 requirements across STATE/SHUT/MENU/STAT)
-- Research complete with 4-phase structure validated
-- Phase 6 starts immediately (no dependencies on prior v1.1 work)
-- v1.0 checkpoint system provides foundation for campaign state enhancement
-- Windows 10 multiprocessing patterns validated in v1.0 (spawn mode, Pool recycling, atomic writes)
+- User estimates 70 days at current processing speed for full 30K+ corpus
+- Per-page OCR is the identified bottleneck (up to 4 rotation passes + preprocessing)
+- 20-core hybrid CPU (8 performance + 12 efficiency cores) available
+- PyMuPDF swap approved by user
+- No specific time target — maximize throughput
 
 ---
 *This file is updated by transition workflows and serves as project memory.*
