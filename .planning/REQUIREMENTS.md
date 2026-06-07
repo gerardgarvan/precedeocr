@@ -23,9 +23,9 @@ Requirements for Campaign Runner milestone. Each maps to roadmap phases.
 
 ### Interactive Menu
 
-- [ ] **MENU-01**: User sees interactive menu when resuming a campaign (Continue / Re-run failures / View stats / Export partial / Fresh start / Quit)
+- [x] **MENU-01**: User sees interactive menu when resuming a campaign (Continue / Re-run failures / View stats / Export partial / Fresh start / Quit)
 - [ ] **MENU-02**: User can re-run only previously failed files
-- [ ] **MENU-03**: User can export partial CSV/JSON results mid-campaign
+- [x] **MENU-03**: User can export partial CSV/JSON results mid-campaign
 - [ ] **MENU-04**: User can start a fresh campaign that clears all prior state
 
 ### Statistics & Reporting
@@ -76,9 +76,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SHUT-03 | Phase 7 | Complete |
 | SHUT-04 | Phase 7 | Complete |
 | SHUT-05 | Phase 7 | Complete |
-| MENU-01 | Phase 8 | Pending |
+| MENU-01 | Phase 8 | Complete |
 | MENU-02 | Phase 8 | Pending |
-| MENU-03 | Phase 8 | Pending |
+| MENU-03 | Phase 8 | Complete |
 | MENU-04 | Phase 8 | Pending |
 | STAT-01 | Phase 9 | Pending |
 | STAT-02 | Phase 9 | Pending |

@@ -79,7 +79,7 @@ Plans:
 **Plans:** 2 plans
 
 Plans:
-- [ ] 08-01-PLAN.md -- Menu display, input validation, handler dispatch, view stats, export partial, quit + unit tests
+- [x] 08-01-PLAN.md -- Menu display, input validation, handler dispatch, view stats, export partial, quit + unit tests
 - [ ] 08-02-PLAN.md -- Re-run failures, fresh start, continue handlers + main() integration + integration tests
 
 ---
