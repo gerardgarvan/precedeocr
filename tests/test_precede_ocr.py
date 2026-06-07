@@ -2381,3 +2381,369 @@ class TestMenu:
         cp = _make_checkpoint_data()
         result = run_menu_loop(state, cp, 200, "output/results.csv", "output/results.json")
         assert result == 'continue'
+
+
+# -- Menu integration tests (Phase 8, Plan 02 TDD RED) --
+
+# Guard imports for functions not yet implemented (TDD RED phase)
+try:
+    from precede_ocr import (
+        handle_continue,
+        handle_rerun_failures,
+        handle_fresh_start,
+        get_failed_filenames,
+    )
+    _MENU_INTEGRATION_AVAILABLE = True
+except ImportError:
+    _MENU_INTEGRATION_AVAILABLE = False
+
+
+@pytest.mark.skipif(not _MENU_INTEGRATION_AVAILABLE,
+                    reason="Menu integration functions not yet implemented (TDD RED)")
+class TestMenuIntegration:
+    """Integration tests for pipeline-integrated menu handlers (Phase 8, Plan 02)."""
+
+    # -- get_failed_filenames tests --
+
+    def test_get_failed_filenames_identifies_errors(self):
+        """get_failed_filenames returns set of filenames with page==0 and notes starting with 'error:'."""
+        results = [
+            {'filename': 'good.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': '', 'folder_path': ''},
+            {'filename': 'good2.pdf', 'page': 2, 'ids': ['67890'], 'rotation_detected': 0, 'notes': '', 'folder_path': ''},
+            {'filename': 'bad.pdf', 'page': 0, 'ids': [], 'rotation_detected': None, 'notes': 'error: TestError: failed', 'folder_path': ''},
+            {'filename': 'bad2.pdf', 'page': 0, 'ids': [], 'rotation_detected': None, 'notes': 'error: RuntimeError: boom', 'folder_path': ''},
+        ]
+        failed = get_failed_filenames(results)
+        assert failed == {'bad.pdf', 'bad2.pdf'}
+
+    def test_get_failed_filenames_ignores_page_level_errors(self):
+        """get_failed_filenames does not flag files with page>0 that have error notes (page-level, not file-level)."""
+        results = [
+            {'filename': 'partial.pdf', 'page': 2, 'ids': [], 'rotation_detected': None, 'notes': 'error: OCR failed on page', 'folder_path': ''},
+            {'filename': 'partial.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': '', 'folder_path': ''},
+        ]
+        failed = get_failed_filenames(results)
+        assert 'partial.pdf' not in failed
+        assert failed == set()
+
+    def test_get_failed_filenames_empty_on_no_failures(self):
+        """get_failed_filenames returns empty set when no failures exist."""
+        results = [
+            {'filename': 'ok.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': '', 'folder_path': ''},
+            {'filename': 'ok2.pdf', 'page': 1, 'ids': ['67890'], 'rotation_detected': 0, 'notes': '', 'folder_path': ''},
+        ]
+        failed = get_failed_filenames(results)
+        assert failed == set()
+
+    # -- handle_rerun_failures tests --
+
+    def test_handle_rerun_no_failures_returns_menu(self, tmp_path, capsys):
+        """handle_rerun_failures with no failed files returns 'menu' and prints message."""
+        results = [
+            {'filename': 'ok.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': '', 'folder_path': ''},
+        ]
+        processed = {'ok.pdf'}
+        checkpoint_data = (results, processed)
+        state = _make_campaign_state(files_failed=0)
+
+        result = handle_rerun_failures(
+            state, checkpoint_data, tmp_path,
+            str(tmp_path / 'results.csv'), str(tmp_path / 'results.json'),
+            workers=1, checkpoint_frequency=50
+        )
+        assert result == 'menu'
+        output = capsys.readouterr().out
+        assert "No failed files" in output
+
+    def test_handle_rerun_removes_old_errors(self, tmp_path):
+        """handle_rerun_failures removes old error entries from checkpoint before reprocessing (D-06)."""
+        success_results = [
+            {'filename': 'ok.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': '', 'folder_path': ''},
+            {'filename': 'ok2.pdf', 'page': 1, 'ids': ['67890'], 'rotation_detected': 0, 'notes': '', 'folder_path': ''},
+            {'filename': 'ok3.pdf', 'page': 1, 'ids': ['11111'], 'rotation_detected': 90, 'notes': '', 'folder_path': ''},
+        ]
+        error_result = {'filename': 'bad.pdf', 'page': 0, 'ids': [], 'rotation_detected': None, 'notes': 'error: TestError: failed', 'folder_path': ''}
+        all_results = success_results + [error_result]
+        processed = {r['filename'] for r in all_results}
+        checkpoint_data = (all_results, processed)
+        state = _make_campaign_state(files_failed=1, input_path=str(tmp_path))
+
+        new_result_for_bad = [
+            {'filename': 'bad.pdf', 'page': 1, 'ids': ['99999'], 'rotation_detected': 90, 'notes': '', 'folder_path': ''},
+        ]
+
+        with patch('precede_ocr.discover_pdfs', return_value=[Path(tmp_path / 'bad.pdf')]), \
+             patch('precede_ocr.process_all_pdfs', return_value=success_results + new_result_for_bad) as mock_process, \
+             patch('precede_ocr.validate_sequence', side_effect=lambda x: x), \
+             patch('precede_ocr.write_results_csv'), \
+             patch('precede_ocr.write_results_json'), \
+             patch('precede_ocr.save_campaign_state_atomic'), \
+             patch('precede_ocr.print_rotation_summary'):
+            handle_rerun_failures(
+                state, checkpoint_data, tmp_path,
+                str(tmp_path / 'results.csv'), str(tmp_path / 'results.json'),
+                workers=1, checkpoint_frequency=50
+            )
+            # Verify process_all_pdfs was called with clean results (no error entry)
+            call_args = mock_process.call_args
+            checkpointed_results_arg = call_args[1].get('checkpointed_results', call_args[0][2] if len(call_args[0]) > 2 else None)
+            if checkpointed_results_arg is None:
+                checkpointed_results_arg = call_args[1]['checkpointed_results']
+            # Old error entry must NOT be in checkpointed_results
+            error_filenames_in_checkpoint = [r['filename'] for r in checkpointed_results_arg if r.get('notes', '').startswith('error:')]
+            assert 'bad.pdf' not in error_filenames_in_checkpoint, "Old error entry should be removed before reprocessing (D-06)"
+
+    def test_handle_rerun_calls_process_only_failed(self, tmp_path):
+        """handle_rerun_failures calls process_all_pdfs with only failed file paths."""
+        success_results = [
+            {'filename': 'ok.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': '', 'folder_path': ''},
+        ]
+        error_result = {'filename': 'bad.pdf', 'page': 0, 'ids': [], 'rotation_detected': None, 'notes': 'error: TestError: failed', 'folder_path': ''}
+        all_results = success_results + [error_result]
+        processed = {r['filename'] for r in all_results}
+        checkpoint_data = (all_results, processed)
+        state = _make_campaign_state(files_failed=1, input_path=str(tmp_path))
+
+        bad_path = Path(tmp_path / 'bad.pdf')
+        ok_path = Path(tmp_path / 'ok.pdf')
+
+        with patch('precede_ocr.discover_pdfs', return_value=[ok_path, bad_path]), \
+             patch('precede_ocr.process_all_pdfs', return_value=success_results) as mock_process, \
+             patch('precede_ocr.validate_sequence', side_effect=lambda x: x), \
+             patch('precede_ocr.write_results_csv'), \
+             patch('precede_ocr.write_results_json'), \
+             patch('precede_ocr.save_campaign_state_atomic'), \
+             patch('precede_ocr.print_rotation_summary'):
+            handle_rerun_failures(
+                state, checkpoint_data, tmp_path,
+                str(tmp_path / 'results.csv'), str(tmp_path / 'results.json'),
+                workers=1, checkpoint_frequency=50
+            )
+            # Verify process_all_pdfs was called with only the failed file path
+            call_args = mock_process.call_args
+            pdf_paths_arg = call_args[0][0] if call_args[0] else call_args[1].get('pdf_paths')
+            pdf_names = [p.name for p in pdf_paths_arg]
+            assert 'bad.pdf' in pdf_names
+            assert 'ok.pdf' not in pdf_names
+
+    def test_handle_rerun_writes_outputs(self, tmp_path):
+        """handle_rerun_failures auto-writes CSV/JSON after completion and returns 'rerun' (D-07)."""
+        results = [
+            {'filename': 'ok.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': '', 'folder_path': ''},
+            {'filename': 'bad.pdf', 'page': 0, 'ids': [], 'rotation_detected': None, 'notes': 'error: TestError: failed', 'folder_path': ''},
+        ]
+        processed = {r['filename'] for r in results}
+        checkpoint_data = (results, processed)
+        state = _make_campaign_state(files_failed=1, input_path=str(tmp_path))
+        output_csv = str(tmp_path / 'results.csv')
+        output_json = str(tmp_path / 'results.json')
+
+        fixed_results = [
+            {'filename': 'ok.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': '', 'folder_path': ''},
+            {'filename': 'bad.pdf', 'page': 1, 'ids': ['99999'], 'rotation_detected': 90, 'notes': '', 'folder_path': ''},
+        ]
+
+        with patch('precede_ocr.discover_pdfs', return_value=[Path(tmp_path / 'bad.pdf')]), \
+             patch('precede_ocr.process_all_pdfs', return_value=fixed_results), \
+             patch('precede_ocr.validate_sequence', side_effect=lambda x: x), \
+             patch('precede_ocr.write_results_csv') as mock_csv, \
+             patch('precede_ocr.write_results_json') as mock_json, \
+             patch('precede_ocr.save_campaign_state_atomic'), \
+             patch('precede_ocr.print_rotation_summary'):
+            result = handle_rerun_failures(
+                state, checkpoint_data, tmp_path,
+                output_csv, output_json,
+                workers=1, checkpoint_frequency=50
+            )
+            assert result == 'rerun'
+            mock_csv.assert_called_once_with(fixed_results, output_csv)
+            mock_json.assert_called_once_with(fixed_results, output_json)
+
+    # -- handle_fresh_start tests --
+
+    def test_handle_fresh_start_deletes_files(self, tmp_path):
+        """handle_fresh_start deletes checkpoint, campaign_state, and error log files."""
+        # Create dummy files
+        (tmp_path / '.checkpoint.json').write_text('{}')
+        (tmp_path / 'campaign_state.json').write_text('{}')
+        (tmp_path / 'errors.log').write_text('error log')
+
+        result = handle_fresh_start(tmp_path)
+        assert result == 'fresh'
+        assert not (tmp_path / '.checkpoint.json').exists()
+        assert not (tmp_path / 'campaign_state.json').exists()
+        assert not (tmp_path / 'errors.log').exists()
+
+    def test_handle_fresh_start_no_error_when_missing(self, tmp_path):
+        """handle_fresh_start returns 'fresh' even when files don't exist (no error)."""
+        result = handle_fresh_start(tmp_path)
+        assert result == 'fresh'
+
+    # -- handle_continue tests --
+
+    def test_handle_continue_returns_continue(self):
+        """handle_continue returns 'continue'."""
+        result = handle_continue()
+        assert result == 'continue'
+
+    # -- main() menu integration tests --
+
+    def test_main_shows_menu_with_checkpoint(self, tmp_path):
+        """main() shows menu when checkpoint exists and fresh=False (D-08)."""
+        # Create checkpoint file
+        checkpoint = {
+            'results': [{'filename': 'test.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': '', 'folder_path': ''}],
+            'processed_files': ['test.pdf'],
+            'metadata': {'input_path': str(tmp_path), 'checkpoint_frequency': 50, 'version': '1.0'}
+        }
+        checkpoint_path = tmp_path / 'output' / '.checkpoint.json'
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint_path.write_text(json.dumps(checkpoint))
+
+        # Create campaign state
+        campaign_state_data = {
+            'version': '1.1', 'campaign_id': 'test_campaign',
+            'input_path': str(tmp_path), 'status': 'interrupted',
+            'started_at': '', 'last_updated': '', 'completed_at': None,
+            'total_files_discovered': 1, 'files_processed': 1,
+            'files_failed': 0, 'folder_stats': {}, 'interruptions': [], 'options': {}
+        }
+        (tmp_path / 'output' / 'campaign_state.json').write_text(json.dumps(campaign_state_data))
+
+        # Create dummy PDF to discover
+        dummy_pdf = tmp_path / 'test.pdf'
+        dummy_pdf.write_bytes(b'%PDF-1.4 dummy')
+
+        with patch('precede_ocr.run_menu_loop', return_value='quit') as mock_menu, \
+             patch('precede_ocr.discover_pdfs', return_value=[dummy_pdf]):
+            main(str(tmp_path), str(tmp_path / 'output' / 'results.csv'), fresh=False)
+            mock_menu.assert_called_once()
+
+    def test_main_skips_menu_when_fresh(self, tmp_path):
+        """main() does NOT show menu when fresh=True (D-09)."""
+        # Create checkpoint file
+        checkpoint = {
+            'results': [{'filename': 'test.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': '', 'folder_path': ''}],
+            'processed_files': ['test.pdf'],
+            'metadata': {'input_path': str(tmp_path), 'checkpoint_frequency': 50, 'version': '1.0'}
+        }
+        checkpoint_path = tmp_path / 'output' / '.checkpoint.json'
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint_path.write_text(json.dumps(checkpoint))
+
+        dummy_pdf = tmp_path / 'test.pdf'
+        dummy_pdf.write_bytes(b'%PDF-1.4 dummy')
+
+        with patch('precede_ocr.run_menu_loop') as mock_menu, \
+             patch('precede_ocr.discover_pdfs', return_value=[dummy_pdf]), \
+             patch('precede_ocr.process_all_pdfs', return_value=[]), \
+             patch('precede_ocr.validate_sequence', side_effect=lambda x: x), \
+             patch('precede_ocr.write_results_csv'), \
+             patch('precede_ocr.write_results_json'), \
+             patch('precede_ocr.print_rotation_summary'), \
+             patch('precede_ocr.calculate_batch_stats', return_value={}), \
+             patch('precede_ocr.print_batch_stats'), \
+             patch('precede_ocr.save_campaign_state_atomic'), \
+             patch('builtins.open', MagicMock()):
+            main(str(tmp_path), str(tmp_path / 'output' / 'results.csv'), fresh=True)
+            mock_menu.assert_not_called()
+
+    def test_main_skips_menu_no_checkpoint(self, tmp_path):
+        """main() does NOT show menu when no checkpoint exists (D-08)."""
+        # No checkpoint file created
+        output_dir = tmp_path / 'output'
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        dummy_pdf = tmp_path / 'test.pdf'
+        dummy_pdf.write_bytes(b'%PDF-1.4 dummy')
+
+        with patch('precede_ocr.run_menu_loop') as mock_menu, \
+             patch('precede_ocr.discover_pdfs', return_value=[dummy_pdf]), \
+             patch('precede_ocr.process_all_pdfs', return_value=[]), \
+             patch('precede_ocr.validate_sequence', side_effect=lambda x: x), \
+             patch('precede_ocr.write_results_csv'), \
+             patch('precede_ocr.write_results_json'), \
+             patch('precede_ocr.print_rotation_summary'), \
+             patch('precede_ocr.calculate_batch_stats', return_value={}), \
+             patch('precede_ocr.print_batch_stats'), \
+             patch('precede_ocr.save_campaign_state_atomic'), \
+             patch('builtins.open', MagicMock()):
+            main(str(tmp_path), str(tmp_path / 'output' / 'results.csv'), fresh=False)
+            mock_menu.assert_not_called()
+
+    def test_main_quit_returns_without_processing(self, tmp_path):
+        """main() with menu returning 'quit' returns without processing."""
+        # Create checkpoint file
+        checkpoint = {
+            'results': [{'filename': 'test.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': '', 'folder_path': ''}],
+            'processed_files': ['test.pdf'],
+            'metadata': {'input_path': str(tmp_path), 'checkpoint_frequency': 50, 'version': '1.0'}
+        }
+        checkpoint_path = tmp_path / 'output' / '.checkpoint.json'
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint_path.write_text(json.dumps(checkpoint))
+
+        campaign_state_data = {
+            'version': '1.1', 'campaign_id': 'test_campaign',
+            'input_path': str(tmp_path), 'status': 'interrupted',
+            'started_at': '', 'last_updated': '', 'completed_at': None,
+            'total_files_discovered': 1, 'files_processed': 1,
+            'files_failed': 0, 'folder_stats': {}, 'interruptions': [], 'options': {}
+        }
+        (tmp_path / 'output' / 'campaign_state.json').write_text(json.dumps(campaign_state_data))
+
+        dummy_pdf = tmp_path / 'test.pdf'
+        dummy_pdf.write_bytes(b'%PDF-1.4 dummy')
+
+        with patch('precede_ocr.run_menu_loop', return_value='quit'), \
+             patch('precede_ocr.discover_pdfs', return_value=[dummy_pdf]), \
+             patch('precede_ocr.process_all_pdfs') as mock_process:
+            main(str(tmp_path), str(tmp_path / 'output' / 'results.csv'), fresh=False)
+            mock_process.assert_not_called()
+
+    def test_main_fresh_rediscovers_pdfs(self, tmp_path):
+        """main() with menu returning 'fresh' rediscovers PDFs and processes."""
+        # Create checkpoint file
+        checkpoint = {
+            'results': [{'filename': 'test.pdf', 'page': 1, 'ids': ['12345'], 'rotation_detected': 90, 'notes': '', 'folder_path': ''}],
+            'processed_files': ['test.pdf'],
+            'metadata': {'input_path': str(tmp_path), 'checkpoint_frequency': 50, 'version': '1.0'}
+        }
+        checkpoint_path = tmp_path / 'output' / '.checkpoint.json'
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint_path.write_text(json.dumps(checkpoint))
+
+        campaign_state_data = {
+            'version': '1.1', 'campaign_id': 'test_campaign',
+            'input_path': str(tmp_path), 'status': 'interrupted',
+            'started_at': '', 'last_updated': '', 'completed_at': None,
+            'total_files_discovered': 1, 'files_processed': 1,
+            'files_failed': 0, 'folder_stats': {}, 'interruptions': [], 'options': {}
+        }
+        (tmp_path / 'output' / 'campaign_state.json').write_text(json.dumps(campaign_state_data))
+
+        dummy_pdf = tmp_path / 'test.pdf'
+        dummy_pdf.write_bytes(b'%PDF-1.4 dummy')
+
+        discover_calls = []
+
+        def mock_discover(path):
+            discover_calls.append(path)
+            return [dummy_pdf]
+
+        with patch('precede_ocr.run_menu_loop', return_value='fresh'), \
+             patch('precede_ocr.discover_pdfs', side_effect=mock_discover), \
+             patch('precede_ocr.process_all_pdfs', return_value=[]) as mock_process, \
+             patch('precede_ocr.validate_sequence', side_effect=lambda x: x), \
+             patch('precede_ocr.write_results_csv'), \
+             patch('precede_ocr.write_results_json'), \
+             patch('precede_ocr.print_rotation_summary'), \
+             patch('precede_ocr.calculate_batch_stats', return_value={}), \
+             patch('precede_ocr.print_batch_stats'), \
+             patch('precede_ocr.save_campaign_state_atomic'), \
+             patch('precede_ocr.load_or_create_campaign_state', return_value=_make_campaign_state()), \
+             patch('builtins.open', MagicMock()):
+            main(str(tmp_path), str(tmp_path / 'output' / 'results.csv'), fresh=False)
+            # discover_pdfs called at least twice: once initially, once after fresh
+            assert len(discover_calls) >= 2, "discover_pdfs should be called again after fresh start"
+            mock_process.assert_called_once()
