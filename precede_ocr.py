@@ -1364,12 +1364,13 @@ def show_campaign_menu(campaign_state: CampaignState,
 
 def handle_view_stats(campaign_state: CampaignState,
                       checkpoint_data: tuple[list[dict], set[str]]) -> str:
-    """Display campaign statistics and return to menu.
+    """Display campaign statistics with per-folder breakdown.
 
-    Per D-04: Shows files done/total, failed count, IDs found.
+    Per D-09: Shows condensed per-folder table (top 10 worst folders + totals).
+    Per D-12: Sorted by success rate ascending (worst first).
 
     Args:
-        campaign_state: CampaignState with campaign metadata
+        campaign_state: CampaignState with campaign metadata and folder_stats
         checkpoint_data: Tuple of (results_list, processed_files_set)
 
     Returns:
@@ -1386,6 +1387,41 @@ def handle_view_stats(campaign_state: CampaignState,
     print(f"\nFiles processed: {campaign_state.files_processed}/{campaign_state.total_files_discovered}")
     print(f"Failed: {campaign_state.files_failed}")
     print(f"IDs found: {ids_count}")
+
+    # STAT-03/D-09: Condensed per-folder table (top 10 worst)
+    folder_stats = campaign_state.folder_stats
+    if folder_stats:
+        # Build sortable list
+        folder_rows = []
+        for folder_path, fs in folder_stats.items():
+            total_files = len(fs['files']) if isinstance(fs['files'], list) else len(fs.get('files', []))
+            failed_files = len(fs['failed_files']) if isinstance(fs['failed_files'], list) else len(fs.get('failed_files', []))
+            success_rate = ((total_files - failed_files) / total_files * 100) if total_files > 0 else 0.0
+            folder_rows.append({
+                'folder': folder_path if folder_path else '(root)',
+                'files': total_files,
+                'success_rate': success_rate,
+                'failed': failed_files
+            })
+
+        # Sort by success rate ascending (D-12: worst first)
+        folder_rows.sort(key=lambda x: x['success_rate'])
+
+        # Display top 10 (D-09 guideline)
+        top_n = 10
+        print(f"\nTop {min(top_n, len(folder_rows))} folders by success rate (worst first):")
+        print("-" * 65)
+        print(f"{'Folder':<35} {'Files':>5} {'Success':>8} {'Failed':>6}")
+        print("-" * 65)
+        for row in folder_rows[:top_n]:
+            print(f"{row['folder']:<35} {row['files']:>5} {row['success_rate']:>7.1f}% {row['failed']:>6}")
+
+        # Overall totals
+        total_files_all = sum(r['files'] for r in folder_rows)
+        total_failed_all = sum(r['failed'] for r in folder_rows)
+        overall_success = ((total_files_all - total_failed_all) / total_files_all * 100) if total_files_all > 0 else 0.0
+        print("-" * 65)
+        print(f"{'OVERALL':<35} {total_files_all:>5} {overall_success:>7.1f}% {total_failed_all:>6}")
 
     return 'menu'
 
