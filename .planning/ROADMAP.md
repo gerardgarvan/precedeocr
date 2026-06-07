@@ -12,7 +12,7 @@ This roadmap delivers campaign management for the v1.0 OCR pipeline, adding prod
 
 - [ ] **Phase 6: Enhanced Campaign State Schema** - Campaign persists state with folder tracking and interruption logging
 - [ ] **Phase 7: Graceful Shutdown Infrastructure** - Ctrl+C handling with worker protection and checkpoint preservation
-- [ ] **Phase 8: Interactive Campaign Menu** - Resume menu with continue/re-run/stats/export options
+- [x] **Phase 8: Interactive Campaign Menu** - Resume menu with continue/re-run/stats/export options (completed 2026-06-07)
 - [ ] **Phase 9: Per-Folder Statistics & Reporting** - Quality breakdown by directory with Markdown report generation
 
 ## Phase Details
@@ -76,11 +76,11 @@ Plans:
 4. User can select "Export partial" and CSV/JSON files are generated from current checkpoint mid-campaign
 5. User can select "Fresh start" and all prior checkpoint/campaign state is cleared for new run
 
-**Plans:** 2 plans
+**Plans:** 2/2 plans complete
 
 Plans:
 - [x] 08-01-PLAN.md -- Menu display, input validation, handler dispatch, view stats, export partial, quit + unit tests
-- [ ] 08-02-PLAN.md -- Re-run failures, fresh start, continue handlers + main() integration + integration tests
+- [x] 08-02-PLAN.md -- Re-run failures, fresh start, continue handlers + main() integration + integration tests
 
 ---
 
@@ -108,7 +108,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 6. Enhanced Campaign State Schema | 3/3 | Complete | 2026-06-06 |
 | 7. Graceful Shutdown Infrastructure | 0/2 | Planned | - |
-| 8. Interactive Campaign Menu | 0/2 | Planned | - |
+| 8. Interactive Campaign Menu | 2/2 | Complete   | 2026-06-07 |
 | 9. Per-Folder Statistics & Reporting | 0/0 | Not started | - |
 
 ---
