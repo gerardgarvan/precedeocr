@@ -1,370 +1,281 @@
-# Project Research Summary
+# Research Summary: OCR Pipeline Performance Optimization (v1.2)
 
-**Project:** Precede OCR — PDF ID Scanner & Mapper (v1.1 Campaign Management)
-**Domain:** Campaign management layer for batch OCR pipeline
-**Researched:** 2026-06-05
-**Confidence:** HIGH
+**Domain:** Batch OCR performance optimization
+**Researched:** 2026-06-07
+**Overall confidence:** MEDIUM-HIGH
 
 ## Executive Summary
 
-This research synthesizes findings for adding campaign management features to the existing v1.0 batch OCR pipeline that processes ~30,429 multi-page PDFs on Windows 10. The v1.1 milestone adds production-grade UX for long-running campaigns: interactive menus for resume/re-run/stats, graceful Ctrl+C shutdown with checkpoint preservation, per-folder quality breakdowns, and statistics reporting. The recommended approach wraps the existing OCR pipeline without modifying its core logic, keeping risk low while adding critical operational features.
+This research synthesizes findings for optimizing the existing v1.1 batch OCR pipeline (94.9% accuracy baseline) that processes ~30,429 multi-page PDFs on Windows 10 with a 20-core hybrid CPU. The v1.2 milestone targets dramatic throughput improvements by replacing slow PDF rendering (pdf2image/Poppler), tuning Tesseract configuration for digit-only extraction, and optimizing parallelism for the hybrid CPU architecture.
 
-The key architectural insight is **separation of concerns**: campaign orchestration lives in a wrapper layer that manages state, presents menus, and handles signals, while the proven v1.0 OCR pipeline (Tesseract + multiprocessing + atomic checkpoints) remains unchanged. This minimizes integration risk and allows incremental delivery across 4 phases: (1) enhanced state schema, (2) graceful shutdown infrastructure, (3) interactive menu system, and (4) per-folder statistics.
+The key architectural insight is **PDF rendering dominates total runtime**. User reports and benchmarks show PyMuPDF renders PDFs 2-12x faster than pdf2image (7-page PDF: 800ms vs 10s), making this the single highest-impact optimization. Combined with Tesseract tuning (character whitelist for 0-9, PSM 7 for single-line digits, OEM 1 LSTM-only mode) and DPI optimization (testing 200-250 DPI vs 300 DPI for speed/accuracy tradeoff), the expected combined speedup is **2-15x end-to-end**, dominated by rendering improvements.
 
-Critical risks center on Windows-specific multiprocessing and signal handling limitations. Signal handlers execute only in the main thread, making blocking calls dangerous; workers inherit SIGINT and may terminate prematurely without protection; and Pool cleanup order is strict (drain → close → join → terminate) to avoid deadlocks. Research validates stdlib-only mitigations: use `multiprocessing.Event()` for cross-process shutdown coordination, set `signal.SIG_IGN` in worker initializers, replace blocking `pool.map()` with non-blocking `pool.imap_unordered()`, and ensure tqdm closes before Pool cleanup. All patterns validated from official Python docs, bug tracker issues, and production experience reports (HIGH confidence).
+Critical risks center on accuracy degradation from aggressive optimization. PSM 7 (single-line mode) may fail if IDs surrounded by other text; lower DPI may reduce accuracy on degraded scans; disabling Tesseract dictionaries may hurt recognition of nearby text. Research validates **phased approach with benchmarking**: Phase 1 applies drop-in optimizations (PyMuPDF, character whitelist, DPI tuning, worker count) with minimal accuracy risk, Phase 2 tests advanced Tesseract configs requiring corpus validation, Phase 3 adds algorithmic enhancements only if needed. Each phase independently benchmarked for speed and accuracy (maintain ≥94% baseline).
 
 ## Key Findings
 
-### Recommended Stack
+### Stack: PyMuPDF + Tesseract Optimization
 
-The v1.1 stack adds minimal dependencies to the proven v1.0 baseline (Tesseract, pytesseract, pdf2image, Pillow, OpenCV, pandas, tqdm, multiprocessing stdlib). Campaign features require only stdlib modules plus two optional libraries for UX polish.
+**Core technology change:**
+- **Replace pdf2image → PyMuPDF** for PDF-to-image rendering. PyMuPDF is 2.3x faster than pdf2jpg, 1.76x faster than XPDF in official benchmarks. User reports: 7-page PDF in 800ms (PyMuPDF) vs 10s (pdf2image). File sizes 10-20% smaller. No Poppler dependency required. Drop-in API change: `convert_from_path()` → `page.get_pixmap(dpi=300)`. **Confidence: HIGH** (PyMuPDF official docs, multiple 2026 comparison articles).
 
-**Core technologies for campaign management:**
-- **signal (stdlib):** SIGINT handler for Ctrl+C on Windows. Only SIGINT and SIGBREAK available (not SIGTERM/SIGUSR1). Handlers execute in main thread only, requiring non-blocking patterns.
-- **multiprocessing.Event (stdlib):** Cross-platform shutdown coordination. More reliable than signals for Windows 'spawn' mode. Workers check Event before starting new files.
-- **questionary 2.1.1:** Interactive CLI menus via prompt_toolkit (cross-platform). Modern API: `questionary.select(message, choices).ask()`. Fallback: stdlib `input()` sufficient for simple number-select menus.
-- **dataclasses-json 0.6.7:** Serialize/deserialize campaign state to JSON. Auto-handles nested dataclasses. Alternative: stdlib `json` + `dataclasses.asdict()` if compatibility issues.
-- **tempfile + os.replace (stdlib):** Already validated in v1.0. Atomic state file writes prevent corruption on crash. Pattern: `NamedTemporaryFile()` → write → fsync → `os.replace()`.
-- **collections.defaultdict/Counter (stdlib):** Per-folder statistics aggregation. Lightweight, fast, zero dependencies. Avoid `multiprocessing.Manager()` (10-100x overhead).
+**Tesseract configuration tuning:**
+- **Character whitelist:** `-c tessedit_char_whitelist=0123456789` constrains search space to digits only. Standard optimization for known character sets. Estimated 10-30% OCR speedup. **Confidence: MEDIUM** (Tesseract docs, PyImageSearch tutorials).
+- **PSM 7 (single-line mode):** Better for isolated 5-digit IDs than PSM 6 (single column). Recommended for number plates, timestamps. Estimated 5-15% OCR speedup. Trade: may fail if ID surrounded by other text. **Confidence: MEDIUM** (Tesseract PSM tuning guides).
+- **OEM 1 (LSTM-only):** Faster than OEM 3 (default) which tries legacy+LSTM. LSTM better context handling for degraded scans. Estimated 10-30% OCR speedup per page. Requires tessdata_fast or tessdata_best (LSTM-only traineddata). **Confidence: MEDIUM** (Tesseract release notes, community comparisons).
+- **Disable dictionaries:** `-c load_system_dawg=false -c load_freq_dawg=false` for non-dictionary content (5-digit IDs). Estimated 5-10% OCR speedup. Low confidence; may reduce accuracy on text near IDs. **Confidence: LOW** (Tesseract docs, needs testing).
 
-**Critical architectural decisions:**
-- **Campaign state separate from checkpoint:** `campaign_state.json` stores metadata (status, folder stats, interruption log); `.checkpoint.json` stores granular results. Both updated atomically.
-- **Stdlib-only menu:** Use `input()` for menus, not external libraries like simple-term-menu (Linux-only). Menu shown only when workers idle (input() blocks signals).
-- **Event-based shutdown, not signal-only:** Signals don't propagate reliably to child processes on Windows. Event is cross-platform IPC mechanism.
-- **Local stats aggregation, not Manager:** Workers return results to main process, main aggregates. Avoids IPC bottleneck for per-PDF stats.
+**DPI optimization:**
+- **300 DPI industry standard** for OCR; beyond 300 DPI "does typically not improve results further" and may degrade accuracy by oversizing fonts. For digits at typical size, 200-250 DPI acceptable. For small text (<10pt), 400-600 DPI may help. **Test corpus for minimum viable DPI**: benchmark 200/250/300 DPI for speed/accuracy tradeoff. Potential 0-50% speedup if currently over-rendering. **Confidence: HIGH** (OCR best practices from Pitt, Penn State, Nutrient guides).
 
-**Version confidence:** HIGH — signal/Event/tempfile/collections from Python 3.14 stdlib docs; questionary 2.1.1 and dataclasses-json 0.6.7 from official PyPI (latest 2025-2026 releases); atomic write pattern validated in existing v1.0 codebase.
+**Process pool tuning:**
+- Project uses `cpu_count()-1` (19 workers on 20-core CPU). **Benchmark 16-20 workers** to verify optimal saturation. Windows 11+ scheduler handles P-core/E-core assignment automatically; manual affinity "should generally be avoided" per Microsoft docs (can decrease performance by interfering with scheduler). **Confidence: MEDIUM** (Python multiprocessing docs, Microsoft Win32 process docs).
 
-### Expected Features
+### Architecture: Phased Optimization with Benchmarking
 
-Research identifies clear table stakes (users expect in any long-running batch job) vs. differentiators (set this tool apart) for campaign management.
+**Three-phase approach to manage risk:**
 
-**Must have (table stakes):**
-- **Continue from checkpoint** — Resume after Ctrl+C or crash without reprocessing completed files. Already have v1.0 checkpoint; enhance with campaign metadata.
-- **Graceful Ctrl+C handling** — Industry standard: stop accepting work → drain in-flight tasks → save state → exit cleanly. Requires signal handling + Event coordination.
-- **Completion progress tracking** — Real-time "X of Y files (Z%)" with files/min rate and ETA. tqdm provides this out-of-box; enhance to show success/failure counts.
-- **Success/failure counts** — Basic accountability: "Completed: 28,500 | Failures: 150 | Remaining: 1,779". Aggregate from checkpoint data.
-- **View partial results** — Export CSV/JSON from checkpoint mid-run for spot-checking quality without waiting for completion.
-- **Re-run failed files only** — Standard failure recovery: after fixing environment issues, retry only failed items. Filter checkpoint to create failure-only file list.
-- **Real-time processing rate** — Files/min or pages/sec to estimate completion time. tqdm provides iteration rate; enhance to track separately for multi-page PDFs.
-- **Error summary on exit** — Show "X files failed" with top failure reasons. List top 5 error types for debugging.
+**Phase 1: Drop-in Performance Gains (Low-Hanging Fruit)**
+- PyMuPDF PDF rendering (2-12x rendering speedup)
+- Tesseract character whitelist (10-30% OCR speedup)
+- Optimal DPI benchmarking (verify 300 DPI, test 200/250 DPI)
+- Process pool worker count tuning (benchmark 16-20 workers)
 
-**Should have (differentiators):**
-- **Interactive campaign menu** — Better UX than CLI flags: Continue / Re-run failures / View stats / Export partial / Fresh start. Use stdlib `input()` for simplicity.
-- **Per-folder quality breakdown** — Unique insight: "Folder A: 99% success, Folder B: 85%" helps identify problem directories (e.g., older scans, different scanner quality).
-- **Preprocessing fallback statistics** — Show how often fallback triggered: "Primary OCR: 92% | Fallback preprocessing: 8%". Already have fallback logic, just add counter.
-- **Rotation heuristic reporting** — Track which rotations succeeded: "90°: 70% | 270°: 20%". Insight into document orientation patterns. Multi-rotation strategy already tracks successful angle.
+**Expected combined speedup:** 2-15x (dominated by PyMuPDF)
+**Complexity:** Low (config changes, API swaps)
+**Risk:** Very low (PyMuPDF = visual fidelity, whitelist = subset constraint)
 
-**Defer (v2+):**
-- **OCR confidence scores** — Tesseract provides per-character confidence; aggregating to page-level adds processing overhead (MEDIUM complexity, useful but not critical).
-- **Smart ETA with historical data** — Regression models for per-folder rate prediction (HIGH complexity, linear ETA sufficient for v1.1).
-- **Anomaly detection flags** — Statistical outlier flagging: "Folder X has 10x more failures than average" (HIGH complexity, requires Z-score modeling).
-- **Batch comparison reports** — Compare multiple campaign runs for optimization experiments (requires campaign ID tracking, historical database — out of scope).
+**Phase 2: Advanced Config Tuning (Requires Corpus Validation)**
+- Tesseract OEM 1 LSTM-only (10-30% OCR speedup, verify tessdata compatibility)
+- PSM 7 single-line mode (5-15% OCR speedup, test accuracy impact)
+- Disable Tesseract dictionaries (5-10% OCR speedup, low confidence)
+- Grayscale-only preprocessing (3-8% preprocessing speedup, test accuracy)
 
-**Anti-features (explicitly avoid):**
-- **Real-time dashboard web UI** — Out of scope per constraints (CLI-only). Stick to terminal UI; users can export results for analysis.
-- **Automatic failure retry logic** — Dangerous without root cause understanding. Provide manual "Re-run failures" option instead.
-- **Database-backed checkpoint** — JSON sufficient per constraints. No database dependencies.
-- **Parallel campaign execution** — Confusing UX. One active campaign at a time. Users can run multiple terminal sessions manually if needed.
-- **Interactive page-by-page review** — Not "no manual intervention" per constraints. Automated campaign only; manual review happens post-processing.
-- **Cloud storage integration** — Local-only tool per constraints. Users can manually upload outputs if desired.
-- **Adaptive parallelization** — Dynamic worker scaling adds complexity and unpredictability. Static worker count sufficient.
+**Expected incremental speedup:** 1.5-2x on top of Phase 1
+**Complexity:** Medium (requires A/B testing on corpus)
+**Risk:** Medium (config changes may affect accuracy)
 
-**Complexity estimate:** Priority 1+2 (table stakes + key differentiators): 20-30 hours across 4 phases.
+**Phase 3: Algorithmic Enhancements (If Phase 1+2 Insufficient)**
+- Smart rotation reordering (10-25% rotation overhead reduction, uses existing stats from v1.1)
+- Conditional DPI fallback (15-35% rendering speedup, mirrors existing preprocessing pattern)
+- Batch PyMuPDF rendering (5-15% rendering speedup, memory trade-off)
 
-### Architecture Approach
-
-Campaign management adds three architectural layers atop the existing single-file OCR pipeline without modifying its core logic. The pattern: **campaign features wrap the pipeline, not interleave with it**. This preserves v1.0 stability while adding production UX.
-
-**Major components:**
-1. **Campaign State Manager** — Loads/saves `campaign_state.json` with campaign ID, status (running/interrupted/completed), folder-level stats, interruption log, and options snapshot. Supplements `.checkpoint.json` (doesn't replace it). Atomic writes with fsync for crash safety.
-
-2. **Interactive Menu (stdlib only)** — Pre-run menu displays when checkpoint exists. Uses stdlib `input()` for action selection (Continue / Re-run failures / View stats / Export / Fresh). Menu only appears when workers idle (avoids input() blocking signals). No external dependencies.
-
-3. **Signal Handler + Event Coordination** — Main process registers `signal.signal(SIGINT, handler)` to catch Ctrl+C. Handler sets `multiprocessing.Event()` flag. Workers initialized with `signal.SIG_IGN` to prevent premature termination, check Event before each PDF, finish in-flight work on shutdown. Strict Pool cleanup: close → join → terminate fallback.
-
-4. **Folder Stats Aggregator** — Post-processes results to group by `Path.resolve()` normalized parent directory. Handles Windows case-insensitivity (`C:\PDFs` vs `C:\pdfs` → single key). Aggregates per-folder metrics: total files, IDs found, no-ID pages, errors. Uses `collections.defaultdict` for lightweight aggregation.
-
-5. **Non-blocking Pool Iteration** — Replaces blocking `pool.map()` with `pool.imap_unordered()` to allow periodic signal checking. Drains iterator before Pool cleanup to prevent queue deadlock. Uses context manager (`with Pool() as pool`) for automatic cleanup.
-
-**Data flow:**
-```
-CLI args → main_with_campaign()
-  ↓
-load_or_create_campaign_state() (campaign_state.json + .checkpoint.json)
-  ↓
-display_campaign_menu() if checkpoint exists
-  ↓
-setup_signal_handlers() (SIGINT → set Event)
-  ↓
-process_all_pdfs_with_shutdown() (existing pipeline with Event checks)
-  ├─ multiprocessing.Pool(initializer=init_worker with signal.SIG_IGN)
-  ├─ imap_unordered() with Event check in main loop
-  ├─ Periodic checkpoint writes (every 50 files, unchanged)
-  └─ On SIGINT: Event.set() → workers finish current file → pool.close() + join()
-  ↓
-aggregate_per_folder_stats(all_results)
-  ↓
-update_campaign_state(status='completed', stats=folder_stats)
-  ↓
-write_campaign_report() (Markdown summary)
-```
-
-**Key architectural patterns:**
-- **Campaign layer wraps pipeline:** OCR core (`process_single_pdf()`, `extract_id_with_rotation()`) unchanged. Campaign logic in orchestration layer.
-- **Separate state files:** Campaign metadata in `campaign_state.json`, granular results in `.checkpoint.json`. Both atomic writes, campaign state references checkpoint version.
-- **Result dict enhancement (additive only):** Add `folder_path` field to result dicts in `process_single_pdf_wrapper()`. Backward compatible (v1.0 code ignores new field).
-- **No changes to workers:** Workers still process one PDF end-to-end, return results. No campaign awareness except checking shutdown Event.
+**Expected incremental speedup:** 1.2-1.5x on top of Phase 1+2
+**Complexity:** High (algorithmic changes, state management, memory profiling)
+**Risk:** Medium-high (increased code complexity, memory usage, new failure modes)
 
 ### Critical Pitfalls
 
-Research identified 10 critical pitfalls specific to Windows multiprocessing + signal handling + campaign management. All HIGH confidence from official Python docs, bug tracker, and production reports.
+**Anti-patterns explicitly avoided:**
 
-1. **Signal handlers execute only in main thread (Windows spawn)** — Blocking calls like `pool.join()` or `pool.map()` prevent handler execution, making program unresponsive to Ctrl+C. **Prevention:** Use `pool.imap_unordered()` with timeout checks; replace blocking `join()` with timed polling; check shutdown Event in main loop with `break` on set.
+1. **Manual CPU affinity for P/E-cores:** Windows 11+ scheduler handles hybrid CPU automatically. Manual affinity "should generally be avoided" per MS docs; can decrease performance. Trust OS scheduler; benchmark worker counts instead. **Confidence: HIGH** (Microsoft Win32 docs, Windows Forum discussions).
 
-2. **Workers inherit SIGINT and terminate prematurely** — Default SIGINT handler raises KeyboardInterrupt in workers, corrupting in-flight work and leaving incomplete checkpoint writes. **Prevention:** Set `signal.SIG_IGN` in Pool `initializer=init_worker`, let only main process handle Ctrl+C via signal handler + Event.
+2. **Tesseract OSD (Orientation+Script Detection):** PSM 0/1 for auto-rotation unreliable per GitHub issue #4426 ("Poor Rotation / Layout detection" June 2025). Project correctly uses multi-rotation brute-force (90/270/0/180) with regex validation. Enhance with smart reordering based on corpus stats from v1.1, not OSD. **Confidence: HIGH** (Tesseract GitHub, PyImageSearch tutorials).
 
-3. **Pool cleanup order causes deadlock or corruption** — Calling `terminate()` before draining iterators corrupts queues; calling `join()` without `close()` hangs indefinitely. **Prevention:** Strict sequence: drain `imap_unordered()` iterator → `pool.close()` → `pool.join(timeout=30)` → check workers finished → `pool.terminate()` only if timeout.
+3. **DPI >300 for digit OCR:** Diminishing returns; may degrade accuracy by oversizing fonts. Stick to 200-300 DPI range. Benchmark lower DPI for speed gains without accuracy loss. **Confidence: HIGH** (OCR best practices guides).
 
-4. **Checkpoint corruption from concurrent writes or missing fsync** — `os.replace()` alone doesn't guarantee data on disk; crash during write leaves partial JSON. Multiple processes writing concurrently create race conditions. **Prevention:** Call `flush()` + `os.fsync()` before `os.replace()`; centralize checkpoint writes in main process only (workers return results, don't write).
+4. **Preprocessing all pages upfront:** Conditional preprocessing (v1.0) targets only failed OCR. Preprocessing everything wastes CPU on clean scans (majority of corpus at 94.9% baseline). Keep conditional fallback. **Confidence: HIGH** (project-specific validated pattern).
 
-5. **imap/imap_unordered deadlock on generator exceptions (Python <3.5)** — Fixed in 3.5+, but generator exceptions crash task handler thread causing indefinite hang. **Prevention:** Use Python 3.5+; wrap generators in exception handlers; or use pre-computed lists instead of generators.
+5. **GPU-accelerated OCR (EasyOCR, PaddleOCR):** Tesseract CPU-first design already fast for digits (<1s/page). GPU adds dependency, complexity, cost. EasyOCR slower on CPU. Optimize Tesseract config instead. **Confidence: MEDIUM** (OCR engine comparisons 2026).
 
-6. **Shared Manager objects create performance bottleneck** — `multiprocessing.Manager()` proxies use IPC for every read/write, reducing performance 10-100x. **Prevention:** Use local counters in workers, aggregate in main process; never use Manager for high-frequency updates (per-PDF stats).
+6. **Page-level multiprocessing:** Overhead of IPC per page. Project correctly uses PDF-level parallelism (each worker handles full PDF). Finer-grained parallelism degrades performance on Windows (spawn cost). Keep coarse-grained: one PDF per worker. **Confidence: HIGH** (PyMuPDF multiprocessing docs, project-specific pattern).
 
-7. **tqdm progress bars leak or corrupt on Pool termination** — Abrupt termination (via `terminate()` or Ctrl+C) leaves terminal formatting corrupted (missing newlines, ANSI codes visible). **Prevention:** Always call `tqdm.close()` in finally block before Pool cleanup; use context manager `with tqdm() as pbar`.
-
-8. **Windows signal limitations break cross-platform code** — Only SIGINT/SIGTERM/SIGBREAK available on Windows; SIGUSR1/SIGHUP crash with ValueError. **Prevention:** Use only SIGINT for cross-platform code; use `multiprocessing.Event()` for worker coordination (not signals).
-
-9. **Interactive menu blocks signal handling during input()** — `input()` syscall doesn't return until Enter pressed; can't Ctrl+C during menu. **Prevention:** Show menu only when workers idle (not while Pool active); use non-blocking alternatives if workers must run during menu.
-
-10. **Per-folder statistics require path normalization** — Windows paths case-insensitive but case-preserving; string keys create duplicates ("C:\\PDFs" vs "C:\\pdfs"). **Prevention:** Use `Path.resolve()` for absolute normalized paths; store as strings for dict keys; handle case-insensitive lookups on Windows.
+7. **Resize/downscale before OCR:** Counterproductive. OCR needs 200-300 DPI minimum. Downscaling from 300 DPI degrades accuracy. Only upscale if source <200 DPI. Render at target DPI directly with PyMuPDF `get_pixmap(dpi=N)`. **Confidence: HIGH** (OCR best practices, image preprocessing research).
 
 ## Implications for Roadmap
 
-Based on research, campaign management should be built in 4 incremental phases that layer onto the existing v1.0 pipeline without modifying core OCR logic. Order dictated by dependency chain: state schema → shutdown infrastructure → menu UX → statistics. Each phase independently testable.
+Based on research, performance optimization should be built in 3 phases with **stop conditions after each phase** to avoid premature optimization. Order dictated by risk vs reward: low-hanging fruit (Phase 1) → corpus validation (Phase 2) → algorithmic complexity (Phase 3).
 
-### Phase 1: Enhanced Campaign State Schema
-**Rationale:** Foundation for all campaign features. Must establish state structure, atomic write patterns, and path normalization before adding menu or stats. Low risk since v1.0 checkpoint system already validates atomic writes.
+### Phase 1: Drop-in Performance Gains
+**Rationale:** Highest individual speedup factors (PyMuPDF rendering dominates), lowest implementation risk (config changes, API swaps), no accuracy risk (PyMuPDF = visual fidelity, whitelist = subset constraint). Fast to validate (benchmark, commit, move on).
 
 **Delivers:**
-- `campaign_state.json` schema (campaign ID, status, progress, folder stats, interruption log)
-- `load_or_create_campaign_state()` / `update_campaign_state()` functions with atomic writes
-- `folder_path` field added to result dicts in `process_single_pdf_wrapper()` (additive, backward compatible)
-- Path normalization with `Path.resolve()` to avoid Windows case-sensitivity duplicates
+1. Replace pdf2image with PyMuPDF for PDF rendering (2-12x rendering speedup)
+2. Add Tesseract character whitelist `0123456789` (10-30% OCR speedup)
+3. Benchmark DPI: test 200/250/300 DPI on representative corpus for optimal speed/accuracy tradeoff
+4. Benchmark worker count: test 16-20 workers on 20-core hybrid CPU for optimal saturation
 
-**Addresses (table stakes):** Continue from checkpoint, per-folder statistics (differentiator)
+**Addresses:** Table stakes — PyMuPDF is industry standard for fast PDF-to-image, character whitelist is standard when character set known, DPI tuning is standard OCR optimization, worker count tuning is standard multiprocessing optimization.
 
-**Avoids (critical pitfalls):** Pitfall #10 (path normalization), Pitfall #4 (checkpoint corruption via atomic writes)
+**Avoids:** Anti-features — no manual CPU affinity (trust OS scheduler), no DPI >300 (diminishing returns), no resize/downscale (counterproductive).
 
-**Uses (from stack):** tempfile + os.replace (already validated in v1.0), pathlib.Path, json stdlib, dataclasses + dataclasses-json
+**Uses (from stack):** PyMuPDF (new dependency), pytesseract (existing), multiprocessing (existing).
 
-**Research flag:** No deeper research needed — extends existing checkpoint system with well-documented stdlib patterns. Standard file I/O.
+**Research flag:** No deeper research needed — PyMuPDF API well-documented, Tesseract config options standard, DPI optimization well-established. **Benchmark required:** speed and accuracy on representative corpus (e.g., 1000 PDFs) to validate speedup and maintain ≥94% baseline accuracy.
+
+**Stop condition:** If Phase 1 achieves acceptable total runtime for 30K+ corpus (e.g., <24 hours end-to-end), stop. Do NOT proceed to Phase 2 unless further optimization ROI justifies increased code complexity.
 
 ---
 
-### Phase 2: Graceful Shutdown Infrastructure
-**Rationale:** Critical safety feature before adding interactive elements. Must establish signal handling, Event coordination, and Pool cleanup patterns to prevent data loss on Ctrl+C. Highest technical risk due to Windows multiprocessing quirks; research thoroughly validated mitigations.
+### Phase 2: Advanced Config Tuning
+**Rationale:** Speedup gains smaller than Phase 1 (10-30% vs 2-12x), requires corpus-wide accuracy validation (time-intensive), config interactions need testing (OEM+PSM+whitelist combinations). Defer until Phase 1 validated.
 
 **Delivers:**
-- `signal.signal(SIGINT, handler)` registration in main process
-- `multiprocessing.Event()` creation + passing via Pool initializer
-- Worker initializer with `signal.SIG_IGN` to prevent premature termination
-- Modified `process_all_pdfs()` → `process_all_pdfs_with_shutdown()` with Event checks in main loop
-- Non-blocking `pool.imap_unordered()` replacing `pool.map()` to allow signal processing
-- Strict cleanup sequence in finally block: drain iterator → close → join(timeout=30) → terminate fallback
-- Campaign state marked `interrupted` on SIGINT with timestamp in interruption log
-- tqdm.close() in finally block before Pool cleanup (prevent terminal corruption)
+5. Tesseract OEM 1 (LSTM-only) mode (10-30% OCR speedup, verify tessdata compatibility)
+6. PSM 7 (single-line mode) for isolated IDs (5-15% OCR speedup, test accuracy impact)
+7. Disable Tesseract dictionaries for digit-only content (5-10% OCR speedup, low confidence)
+8. Grayscale-only preprocessing (3-8% preprocessing speedup, test accuracy impact)
 
-**Addresses (table stakes):** Graceful Ctrl+C handling, campaign resume after interrupt
+**Addresses:** Differentiators — advanced Tesseract tuning beyond standard configs, preprocessing simplification.
 
-**Avoids (critical pitfalls):** Pitfall #1 (main thread blocking), #2 (worker SIGINT), #3 (cleanup deadlock), #7 (tqdm leaks), #8 (Windows signals)
+**Avoids:** Anti-features — no OSD (unreliable), no preprocessing all pages (conditional fallback proven).
 
-**Uses (from stack):** signal stdlib, multiprocessing.Event, Pool initializer, tqdm (existing)
+**Uses (from stack):** pytesseract config params (existing), PIL/OpenCV (existing).
 
-**Research flag:** **Requires extensive manual testing on Windows** — automated tests can't fully validate Ctrl+C timing edge cases, second Ctrl+C force-quit, or zombie process cleanup. Budget 30-50% extra QA time. Test scenarios: Ctrl+C early/mid/late in batch, second Ctrl+C force-quit, verify Task Manager shows no zombie processes, checkpoint saved correctly on interrupt.
+**Research flag:** No deeper research needed — all configs documented in Tesseract official docs. **A/B testing required:** each config change must be benchmarked on corpus for accuracy impact. Test interactions (e.g., OEM 1 + PSM 7 + whitelist together).
+
+**Stop condition:** If accuracy drops below 94% baseline with any config, revert that config. If incremental speedup <1.5x on top of Phase 1, stop (diminishing returns). Do NOT proceed to Phase 3 unless Phase 1+2 still insufficient.
 
 ---
 
-### Phase 3: Interactive Campaign Menu
-**Rationale:** UX layer that surfaces campaign state to user. Depends on Phase 1 (state schema) for resume/stats display. Must follow Phase 2 (shutdown) to ensure menu doesn't block signal handling. Stdlib-only implementation (no external dependencies) reduces risk.
+### Phase 3: Algorithmic Enhancements
+**Rationale:** Highest complexity-to-speedup ratio, requires new infrastructure (stats tracking, fallback logic, memory management), premature optimization if Phase 1+2 achieve target throughput. Only proceed if Phases 1+2 insufficient.
 
 **Delivers:**
-- `display_campaign_menu()` with stdlib `input()` — options: [1] Continue, [2] Re-run failures, [3] View stats, [4] Export partial, [5] Fresh start, [Q] Quit
-- `display_folder_stats()` — table view of per-folder breakdown (uses campaign state from Phase 1)
-- Menu action handlers:
-  - Continue: calls existing `process_all_pdfs_with_shutdown()` with remaining PDFs
-  - Re-run failures: filters to failed files from campaign state, creates new file list
-  - View stats: displays folder table, returns to menu
-  - Export partial: calls existing CSV/JSON writers with checkpoint data
-  - Fresh start: deletes both `.checkpoint.json` and `campaign_state.json`, creates new campaign
-- Menu flow: Load campaign state → Show menu (if checkpoint exists) → Dispatch action → Execute pipeline or loop to menu
-- Menu only shown when workers idle (input() doesn't block active Pool)
+9. Smart rotation reordering based on corpus stats from v1.1 (10-25% rotation overhead reduction if IDs clustered at 90°)
+10. Conditional DPI fallback: start at 200 DPI, re-render at 300 DPI only if OCR fails (15-35% rendering speedup if 70%+ succeed at lower DPI)
+11. Batch PyMuPDF rendering: pre-render all pages before OCR loop (5-15% rendering speedup, memory trade-off)
 
-**Addresses (table stakes):** Re-run failed files, view partial results; Interactive campaign menu (differentiator)
+**Addresses:** Differentiators — smart strategies beyond config tuning, algorithmic optimizations.
 
-**Avoids (critical pitfalls):** Pitfall #9 (input() blocking signals — menu only when workers idle), Pitfall #5 (generator exceptions — pre-compute file lists before menu)
+**Avoids:** Anti-features — no page-level multiprocessing (IPC overhead), no caching across runs (single-shot batch job).
 
-**Uses (from stack):** stdlib input() (primary), optional questionary 2.1.1 for better UX, pathlib for file operations
+**Uses (from stack):** PyMuPDF (Phase 1), campaign stats from v1.1 (existing), tempfile for batch rendering (stdlib).
 
-**Research flag:** No deeper research needed — simple menu pattern with stdlib. Manual testing required for UX validation (menu displays correctly, actions dispatch as expected, loop back to menu works).
+**Research flag:** No deeper research needed — smart rotation builds on v1.1 stats infrastructure, conditional DPI mirrors existing preprocessing fallback, batch rendering documented in PyMuPDF multiprocessing guide. **Memory profiling required:** batch rendering holds N pages * ~1-2MB per 300 DPI image in memory; validate on multi-page PDFs.
 
----
-
-### Phase 4: Per-Folder Statistics & Reporting
-**Rationale:** Quality insights layer. Depends on Phase 1 (`folder_path` in results). Can be built in parallel with Phase 3 (menu) but reporting comes after pipeline completes. Lowest risk — pure post-processing of existing results.
-
-**Delivers:**
-- `aggregate_per_folder_stats()` — groups results by `folder_path`, calculates per-folder metrics:
-  - total_files, processed, ids_found, no_id_pages, errors
-  - preprocessing fallback trigger count (if fallback exists)
-  - rotation distribution (90°/270°/0°/180°)
-- Enhanced `campaign_state.json` with `folder_stats` dict populated after pipeline completes
-- `write_campaign_report()` — Markdown report (`campaign_report.md`) with:
-  - Campaign summary (ID, duration, total files, total IDs extracted)
-  - Per-folder breakdown table
-  - Problem area highlights (folders with high error rate)
-  - Recommendations (e.g., "Re-run folder2 with --debug flag")
-- Menu option [3] displays folder stats table from existing campaign state (doesn't re-run pipeline)
-
-**Addresses (differentiators):** Per-folder quality breakdown, preprocessing fallback statistics, rotation heuristic reporting
-
-**Avoids (critical pitfalls):** Pitfall #6 (Manager overhead — uses local aggregation in main process post-pipeline), Pitfall #10 (path normalization — established in Phase 1)
-
-**Uses (from stack):** collections.defaultdict (lightweight aggregation), pathlib, Markdown string formatting
-
-**Research flag:** No deeper research needed — straightforward aggregation with stdlib `collections.defaultdict`. Standard post-processing pattern.
+**Stop condition:** If code complexity outweighs speedup gains (<1.2x incremental), stop. If memory usage becomes problematic (OOM on multi-page PDFs), revert batch rendering.
 
 ---
 
 ### Phase Ordering Rationale
 
 **Why this order:**
-1. **Phase 1 before Phase 2:** Campaign state must exist before shutdown can mark it `interrupted`. Folder path tracking must be in place before workers start (can't retrofit after results collected).
+1. **Phase 1 first:** Lowest risk, highest reward. PyMuPDF rendering dominates total runtime based on benchmarks. Get 2-15x speedup with minimal code changes before attempting riskier optimizations.
 
-2. **Phase 2 before Phase 3:** Graceful shutdown must work before menu appears, otherwise selecting "Continue" after Ctrl+C could encounter corrupt state or deadlocked Pool. Signal handling infrastructure is foundation for all interactive features.
+2. **Phase 2 after Phase 1:** Requires accuracy validation on corpus (time-intensive). Only proceed if Phase 1 insufficient for target throughput. Each config change must be A/B tested; interactions between configs (OEM+PSM+whitelist) need validation.
 
-3. **Phase 3 independent of Phase 4:** Menu and stats are orthogonal features; can be built in parallel. Menu doesn't require stats to function (shows "no stats available" if Phase 4 incomplete). Can defer Phase 4 if time-constrained without breaking menu.
-
-4. **Phase 4 last:** Pure post-processing; no dependencies on it. Can be deferred if time-constrained without breaking core campaign functionality (continue/re-run/export still work).
+3. **Phase 3 last (only if needed):** Highest complexity, lowest per-feature speedup. Smart rotation requires v1.1 stats infrastructure; conditional DPI requires fallback logic; batch rendering requires memory management. Only justified if Phase 1+2 still leave throughput gap.
 
 **Dependency chain discovered in research:**
-- Enhanced state schema (Phase 1) required by menu display (Phase 3) and stats reporting (Phase 4)
-- Graceful shutdown (Phase 2) required before interactive menu (Phase 3) to prevent input() blocking Ctrl+C
-- Folder path tracking (Phase 1) required by per-folder stats (Phase 4)
-- No dependencies on Phase 4 (post-processing only)
+- PyMuPDF rendering (Phase 1) enables batch rendering optimization (Phase 3)
+- DPI tuning (Phase 1) informs conditional DPI fallback (Phase 3)
+- Rotation stats from v1.1 enable smart reordering (Phase 3)
+- Tesseract config optimizations (Phase 1+2) are independent of algorithmic enhancements (Phase 3)
 
-**Architecture preserves v1.0 isolation:**
-- All phases wrap existing `process_all_pdfs()` / `process_single_pdf()` without modifying OCR logic
-- Worker functions unchanged except adding `folder_path` field to return dict (additive, backward compatible)
-- Checkpoint writes remain atomic (tempfile + fsync + os.replace pattern validated in v1.0)
-- Pool parallelization logic unchanged (coarse-grained per-PDF workers)
+**Architecture preserves v1.0/v1.1 patterns:**
+- All phases enhance existing `process_single_pdf()` / multi-rotation loop without breaking checkpoints or campaign management
+- Worker functions remain PDF-level (coarse-grained parallelism)
+- Atomic checkpoint writes unchanged (crash-safe resume)
+- Campaign stats from v1.1 can inform Phase 3 rotation reordering
 
 **Pitfall avoidance:**
-- Phase 1 establishes atomic writes and path normalization before complexity added
-- Phase 2 implements all shutdown safety patterns before interactive features (most dangerous phase — needs manual testing)
-- Phase 3 builds menu only when shutdown patterns proven safe
-- Phase 4 uses local aggregation patterns (not Manager) established from research
+- Phase 1 establishes PyMuPDF baseline and optimal DPI before advanced tuning
+- Phase 2 validates each config change individually for accuracy impact before combining
+- Phase 3 deferred until Phases 1+2 proven insufficient (avoid premature optimization)
 
-### Research Flags
+### Research Flags for Phases
 
 **Phases likely needing deeper research during planning:**
-- **Phase 2 (Graceful Shutdown):** Windows multiprocessing has documented edge cases around SIGINT propagation, Pool zombie processes, and context manager cleanup. Research validates mitigations but **manual testing on Windows mandatory** — automated tests can't cover all Ctrl+C timing scenarios or force-quit (second Ctrl+C) behavior. Budget 30-50% more testing time than typical feature. Test checklist: Ctrl+C at various points (early/mid/late), second Ctrl+C force-quit, Task Manager zombie verification, checkpoint integrity after interrupt.
+- **None** — all optimization techniques documented in official PyMuPDF, Tesseract, and Python multiprocessing guides. Research synthesis provides sufficient detail for implementation.
 
 **Phases with standard patterns (skip research-phase):**
-- **Phase 1 (Campaign State):** Direct extension of existing v1.0 checkpoint system. Atomic write pattern already validated. Path normalization well-documented in pathlib docs. JSON schema design straightforward.
-- **Phase 3 (Interactive Menu):** Stdlib `input()` pattern trivial. No complex integrations. UX testing required but no technical unknowns. Menu logic is simple dispatch.
-- **Phase 4 (Folder Statistics):** Standard aggregation with `defaultdict`. No novel algorithms or libraries. Post-processing patterns well-documented.
+- **Phase 1 (Drop-in Gains):** PyMuPDF API well-documented, Tesseract whitelist standard, DPI optimization standard, worker tuning standard. **Benchmarking required,** not additional research.
+- **Phase 2 (Advanced Config):** All Tesseract configs in official docs. **A/B testing required** for accuracy validation, not additional research.
+- **Phase 3 (Algorithmic):** Smart rotation builds on v1.1, conditional DPI mirrors v1.0 preprocessing fallback, batch rendering in PyMuPDF multiprocessing guide. **Memory profiling required,** not additional research.
 
-**No phases need `/gsd:research-phase`** — all patterns sufficiently documented in this research synthesis and source files (STACK.md, FEATURES.md, ARCHITECTURE.md, PITFALLS.md). Phase 2 needs validation/testing, not additional research.
+**No phases need `/gsd:research-phase`** — all patterns sufficiently documented in this research synthesis and official documentation (PyMuPDF, Tesseract, Python stdlib). Implementation needs benchmarking and validation, not additional research.
 
 ## Confidence Assessment
 
 | Area | Confidence | Notes |
 |------|------------|-------|
-| **Stack** | HIGH | v1.0 technologies already validated in production per CLAUDE.md. v1.1 additions (questionary, dataclasses-json, signal/Event) from official PyPI + stdlib docs. All Windows-compatible. Tesseract 5.x + multiprocessing proven in existing codebase. |
-| **Features** | HIGH | Table stakes derived from batch processing best practices (OneUpTime blog series 2026-01-30, graceful shutdown patterns). Differentiators align with campaign management use cases (per-folder stats, interactive menus). Anti-features clearly bounded by project constraints (CLI-only, local, no DB). Source quality high (official docs, industry best practices). |
-| **Architecture** | HIGH | Campaign-wraps-pipeline pattern proven in similar batch systems. Signal handling + Event coordination documented in Python multiprocessing guides and production blog posts (The-Fonz, peterspython.com). Atomic checkpoint writes validated by v1.0 implementation. Windows-specific patterns verified via official Python docs (multiprocessing spawn, signal limitations), GitHub issues (SIGINT handling discussion #90064), and community reports. Separation of concerns reduces integration risk. |
-| **Pitfalls** | HIGH | 10 critical pitfalls sourced from official Python bug tracker (issue #23051 imap deadlock, issue #38263 DupHandle race, issue #35629 Pool hang), stdlib signal docs (Windows limitations SIGINT/SIGBREAK only), multiprocessing docs (spawn vs fork), and production experience reports (tqdm terminal corruption, Manager IPC overhead, OSD unreliability). All have documented mitigations with code examples. Windows spawn behavior well-understood. |
+| **Stack (PyMuPDF)** | HIGH | Official PyMuPDF docs, multiple 2026 benchmarks (PyMuPDF vs pdfplumber, Battle of PDF Titans), user reports (800ms vs 10s for 7-page PDF). Drop-in replacement for pdf2image. No GPU required, Windows-compatible. |
+| **Stack (Tesseract config)** | MEDIUM-HIGH | Character whitelist, PSM modes, OEM modes, dictionary disabling all documented in official Tesseract docs. PSM 7 and OEM 1 require corpus testing for accuracy impact. Whitelist is standard optimization (HIGH confidence). Dictionary disabling is LOW confidence (needs testing). |
+| **Features (DPI optimization)** | HIGH | 300 DPI industry standard for OCR per Pitt, Penn State, Nutrient guides. "Beyond 300 DPI does typically not improve results further" per Broadcom OCR guide. 200-250 DPI acceptable for digits at typical size. Small text (<10pt) may need 400-600 DPI. |
+| **Features (Worker tuning)** | MEDIUM | Python multiprocessing docs confirm `cpu_count()` standard, but optimal worker count depends on workload (CPU-bound vs I/O-bound). Hybrid CPU (P/E-cores) handled by Windows 11+ scheduler automatically per Microsoft docs. Manual affinity "should generally be avoided." **Benchmarking required** to verify optimal count (16-20 workers). |
+| **Architecture (Phased approach)** | HIGH | Phased optimization with stop conditions is standard performance engineering practice. Phase 1 low-risk/high-reward, Phase 2 medium-risk/medium-reward, Phase 3 high-risk/low-reward matches industry best practices. Benchmark-driven validation prevents premature optimization. |
+| **Pitfalls (Anti-features)** | HIGH | OSD unreliability documented in Tesseract GitHub #4426. DPI >300 diminishing returns per OCR best practices. Manual CPU affinity discouraged per Microsoft docs. Page-level multiprocessing IPC overhead validated in PyMuPDF multiprocessing guide. Preprocessing conditional fallback proven in v1.0. |
 
-**Overall confidence:** HIGH
+**Overall confidence:** MEDIUM-HIGH
 
-Research is comprehensive with authoritative sources (official docs, PyPI, Python tracker, production experience). The v1.0 baseline already validates core patterns (Tesseract + multiprocessing + atomic checkpoints) in this codebase. v1.1 additions are well-trodden patterns (signal handling, interactive menus, stats aggregation) with stdlib-focused implementations that minimize external dependencies and Windows compatibility risks. Recommendations are prescriptive with specific code patterns and known pitfall mitigations.
+Research is comprehensive with authoritative sources (official docs for PyMuPDF, Tesseract, Python multiprocessing; 2026 benchmarks from reputable sources; OCR best practices from educational institutions and enterprise guides). PyMuPDF speedup claims are HIGH confidence (official benchmarks + user reports). Tesseract config optimizations are MEDIUM confidence (documented in official docs but require corpus testing for accuracy impact). Worker tuning and DPI optimization need benchmarking on actual hardware/corpus to validate claims.
 
-### Gaps to Address
+**Recommendation:** Proceed with phased approach. **Phase 1 is low-risk with proven technologies** (PyMuPDF widely adopted, character whitelist standard, DPI tuning standard). **Phases 2+3 are medium-risk** (Tesseract config changes may affect accuracy, algorithmic enhancements add complexity). Each phase must be independently benchmarked for speed and accuracy before proceeding to next phase. Stop if target throughput achieved or accuracy drops below baseline.
 
-**Minor gaps requiring validation during implementation:**
+## Gaps to Address
 
-1. **Windows-specific multiprocessing edge cases:** Research documents known pitfalls and mitigations, but Windows 'spawn' mode has subtle timing issues around Pool shutdown that can't be fully validated without manual testing. **Mitigation:** Phase 2 must include extensive manual QA on Windows 10 with large batches (1000+ PDFs), Ctrl+C at various points (early/mid/late), second Ctrl+C force-quit, and process cleanup verification in Task Manager. Create test checklist based on pitfalls research.
+**Areas where research was inconclusive:**
 
-2. **questionary Windows compatibility:** Research indicates questionary 2.1.1 supports Windows via prompt_toolkit, but some users report terminal encoding issues on older Windows consoles. **Mitigation:** Include fallback to stdlib `input()` if questionary import fails or raises exceptions; test on Windows 10 cmd.exe and PowerShell terminals. If issues arise, use `input()` fallback (already designed). pick library with blessed backend is documented secondary fallback.
+1. **Tesseract dictionary disabling impact:** Research documents that disabling `load_system_dawg` and `load_freq_dawg` can improve recognition on non-dictionary content (receipts, IDs), but may reduce accuracy on standard text. **Gap:** No specific benchmarks for 5-digit numeric IDs surrounded by cursive "Precede" label. **Mitigation:** Phase 2 must A/B test this config on representative corpus; if accuracy drops, revert. Mark as **LOW confidence** feature.
 
-3. **dataclasses-json Python 3.14 support:** Library officially supports Python 3.7-3.12; no official 3.13+ release yet (as of June 2024 release). **Mitigation:** Test compatibility on Python 3.14 (project environment). If issues arise, use stdlib fallback: `json` + `dataclasses.asdict()` pattern (more manual but zero dependencies, already documented in research).
+2. **PyMuPDF vs pdf2image exact speedup on Windows:** Research shows 2-12x range from various benchmarks, but no direct head-to-head on Windows 10 with identical multi-page PDFs. User reports (800ms vs 10s) suggest 12x, but official PyMuPDF benchmark shows 2.3x vs pdf2jpg, 1.76x vs XPDF (not pdf2image directly). **Gap:** Actual speedup on project's hardware/corpus unknown. **Mitigation:** Phase 1 must benchmark before/after on representative 1000 PDFs to measure real-world speedup. Expect 2-12x range, but validate.
 
-4. **Checkpoint file size growth:** With 30K+ PDFs, `campaign_state.json` folder stats could grow large if deeply nested directories. **Mitigation:** Monitor file size during Phase 4 testing; if > 10MB, consider storing only top-level folder aggregates or compressing with gzip. Research shows JSON sufficient but validate at scale.
+3. **Optimal worker count for 20-core hybrid CPU on Windows:** Research documents that Windows 11+ scheduler handles P/E-core assignment, but optimal worker count (16 vs 19 vs 20 vs 24) depends on workload characteristics (CPU-bound vs I/O-bound ratio). **Gap:** No specific guidance for OCR workload (4 rotation attempts + preprocessing fallback) on hybrid CPU. **Mitigation:** Phase 1 must benchmark 16-20 worker counts to find optimal saturation point. Monitor CPU utilization; if <85%, increase workers; if context switching overhead high, decrease workers.
 
-5. **tqdm terminal corruption edge cases:** Research documents tqdm.close() in finally block prevents most corruption, but some Windows terminals (older cmd.exe) may still have issues. **Mitigation:** Test on target Windows 10 environment; if issues persist, consider tqdm-multiprocess library (documented in STACK.md) or fallback to simple print() progress (less UX but more robust).
+4. **Conditional DPI fallback effectiveness:** Research suggests 200-250 DPI may suffice for clean scans, but project's corpus has "scanned images vary in quality" per constraints. **Gap:** Unknown what percentage of corpus succeeds at 200 DPI vs requires 300 DPI. If <70% succeed at lower DPI, conditional fallback adds overhead without benefit. **Mitigation:** Phase 3 (if needed) must benchmark accuracy at 200 DPI on representative corpus before implementing fallback logic. If >90% need 300 DPI anyway, skip conditional fallback (not worth complexity).
 
-**All gaps are validation questions, not research gaps.** Existing research provides proven mitigation strategies; implementation needs to validate on target hardware/OS and tune based on observed behavior (e.g., adjust Pool timeout values, choose questionary vs input() based on terminal compatibility).
+5. **Memory usage for batch PyMuPDF rendering:** Research documents PyMuPDF internal caching benefits from batch access, but memory trade-off is N pages * ~1-2MB per 300 DPI image. **Gap:** Unknown typical page count per PDF in corpus. If PDFs average 10 pages, batch rendering holds 10-20MB per PDF per worker (19 workers * 20MB = 380MB), acceptable. If PDFs average 100 pages, batch rendering holds 190MB per worker (19 workers * 190MB = 3.6GB), potentially problematic. **Mitigation:** Phase 3 (if needed) must profile memory usage on largest PDFs in corpus before enabling batch rendering. If memory spikes cause OOM, revert or add max-pages-per-batch limit.
+
+**All gaps require benchmarking/profiling on actual hardware and corpus, not additional research.** Existing research provides optimization strategies; implementation needs to validate assumptions with empirical data.
+
+## Topics Needing Phase-Specific Research Later
+
+**None.** All performance optimization techniques are documented in official sources:
+- PyMuPDF: official docs, multiprocessing guide, performance comparison methodology
+- Tesseract: official docs for PSM/OEM/whitelist/dictionaries, GitHub issues for known limitations
+- Python multiprocessing: stdlib docs for Pool, worker tuning, Windows spawn behavior
+- OCR best practices: educational guides (Pitt, Penn State), enterprise guides (Nutrient, Broadcom)
+
+**Implementation needs empirical validation, not additional research:**
+- Phase 1: Benchmark PyMuPDF speedup, DPI accuracy, worker saturation on actual hardware/corpus
+- Phase 2: A/B test Tesseract configs for accuracy impact on representative corpus
+- Phase 3: Profile memory usage for batch rendering, validate smart rotation speedup from v1.1 stats
+
+**No `/gsd:research-phase` calls needed** — proceed directly to `/gsd:plan-phase` with benchmarking/validation steps included in phase plans.
 
 ## Sources
 
-### Primary (HIGH confidence)
+### Performance Benchmarks & Comparisons
+- [PyMuPDF Appendix 4: Performance Comparison Methodology](https://pymupdf.readthedocs.io/en/latest/app4.html)
+- [PyMuPDF Multiprocessing Documentation](https://pymupdf.readthedocs.io/en/latest/recipes-multiprocessing.html)
+- [PyMuPDF vs pdfplumber in 2026](https://pdfmux.com/blog/pymupdf-vs-pdfplumber/)
+- [Battle of the PDF Titans: PyMuPDF, pdfplumber, pdf2image, and Textract](https://openwebtech.com/battle-of-the-pdf-titans-apache-tika-pymupdf-pdfplumber-pdf2image-and-textract/)
+- [PaddleOCR vs Tesseract vs EasyOCR: OCR Speed and Accuracy 2026](https://www.codesota.com/ocr/paddleocr-vs-tesseract)
 
-**Official Documentation:**
-- Python stdlib documentation: signal, multiprocessing, pathlib, tempfile, collections, dataclasses — official Python 3.14 docs validate all core patterns
-- PyPI official pages: pytesseract, pdf2image, Pillow, opencv-python, pandas, tqdm, questionary, dataclasses-json, pick — version info, dependencies, platform support
-- Python bug tracker: Issue #23051 (imap deadlock), Issue #38263 (DupHandle race), Issue #35629 (Pool hang) — known multiprocessing pitfalls with documented workarounds
-- Tesseract GitHub: Issue #4426 (OSD unreliability June 2025) — validates multi-rotation strategy over OSD
+### Tesseract Configuration & Optimization
+- [Tuning Tesseract PSM and OEM for Precise OCR Character Recognition](https://sqlpey.com/python/tesseract-psm-oem-tuning/)
+- [Tesseract: Improving the quality of the output](https://tesseract-ocr.github.io/tessdoc/ImproveQuality.html)
+- [Improve Accuracy by tuning PSM values of Tesseract – Part 1](https://www.cloudthat.com/resources/blog/improve-accuracy-by-tuning-psm-values-of-tesseract-part-1)
+- [Improve Accuracy by tuning PSM values of Tesseract – Part 2](https://www.cloudthat.com/resources/blog/improve-accuracy-by-tuning-psm-values-of-tesseract-part-2)
+- [All Tesseract OCR options – Muthukrishnan](https://muthu.co/all-tesseract-ocr-options/)
+- [Whitelisting and Blacklisting Characters with Tesseract and Python](https://pyimagesearch.com/2021/09/06/whitelisting-and-blacklisting-characters-with-tesseract-and-python/)
 
-**Windows-specific:**
-- Microsoft documentation: Windows signal handling (SIGINT/SIGBREAK only), file system operations (MoveFileEx atomicity)
-- Python Windows multiprocessing: spawn method requirements, pickle overhead, process creation costs
+### DPI & Image Quality Best Practices
+- [Best Practices - OCR @ Pitt](https://pitt.libguides.com/ocr/bestpractices)
+- [Image Quality and Resolution for OCR results](https://knowledge.broadcom.com/external/article/254861/image-quality-and-resolution-for-ocr-res.html)
+- [Planning and Executing a Successful OCR project - Penn State](https://guides.libraries.psu.edu/c.php?g=1202269&p=8791865)
+- [OCR best practices - Document Engine - Nutrient](https://www.nutrient.io/guides/document-engine/ocr/best-practices/)
+- [PyMuPDF Pixmap and Image Processing](https://pymupdf.readthedocs.io/en/latest/pixmap.html)
 
-### Secondary (MEDIUM confidence)
+### Python Multiprocessing & Memory Management
+- [Multiprocessing in Python: A Guide to Using Multiple CPU Cores](https://medium.com/@aruns89/multiprocessing-in-python-a-guide-to-using-multiple-cpu-cores-f2b3c1bcc83a)
+- [Python multiprocessing documentation](https://docs.python.org/3/library/multiprocessing.html)
+- [Memory Leak in Python multiprocessing.Pool](https://fromkk.com/posts/memory-leak-in-python-multiprocessing-dot-pool/)
+- [Python multiprocessing.pool Memory Usage Growing: Causes and Solutions](https://www.pythontutorials.net/blog/memory-usage-keep-growing-with-python-s-multiprocessing-pool/)
 
-**Batch Processing Best Practices:**
-- OneUpTime blog series (2026-01-30): batch statistics, monitoring, reporting, metrics — establishes table stakes features
-- Campaign management patterns: Google Patents GB2364399A, GE Digital Campaign Manager Guide — validates campaign workflow patterns
-- Checkpoint/resume workflows: fast.io AI agent checkpointing, Microsoft Learn workflows — confirms checkpoint-based resume patterns
+### Windows Hybrid CPU & Affinity
+- [How to Permanently Set CPU Affinity in Windows 11 & 10](https://windowsforum.com/threads/how-to-permanently-set-cpu-affinity-in-windows-11-10-for-optimal-performance.369250/)
+- [CPU affinity in Windows: controls cores and priority](https://www.pchardwarepro.com/en/How-to-manage-CPU-cores-with-affinity-and-priority-in-Windows/)
+- [Multiple Processors - Win32 apps | Microsoft Learn](https://learn.microsoft.com/en-us/windows/win32/procthread/multiple-processors)
+- [Processor Groups - Win32 apps | Microsoft Learn](https://learn.microsoft.com/en-us/windows/win32/procthread/processor-groups)
 
-**Graceful Shutdown Patterns:**
-- Zylos.ai research (2026-02-25): graceful shutdown for long-lived services — validates Event-based coordination
-- River docs: graceful shutdown patterns — confirms signal handling approach
-- The-Fonz blog: graceful exit with Python multiprocessing — code examples for Pool cleanup
-- peterspython.com (2026): multiprocessing graceful shutdown in proper order — validates close → join → terminate sequence
-- DEV Community (2026): Go shutdown patterns (concepts applicable to Python) — general shutdown principles
+### OCR Preprocessing & Image Processing
+- [Image preprocessing and modified adaptive thresholding for improving OCR](https://arxiv.org/abs/2111.14075)
+- [Enhancing OCR Accuracy with OpenCV and PyTesseract](https://trenton3983.github.io/posts/ocr-image-processing-pytesseract-cv2/)
+- [OpenCV vs Pillow for Image Processing](https://primeprogram.medium.com/opencv-vs-pillow-which-is-better-for-image-processing-93f68ab81137)
 
-**Interactive CLI Patterns:**
-- InquirerPy GitHub + docs: interactive CLI prompts and menus — validates questionary choice
-- ArjanCodes blog: Rich Python library for interactive CLI tools — confirms Rich + questionary integration
-- The Green Report: interactive CLI automation with Python — validates prompt_toolkit approach
-
-**Progress Tracking:**
-- Rich documentation: progress display, multi-threading visualization — validates Rich Progress patterns
-- Lei Mao's Log Book: Python tqdm multiprocessing — confirms tqdm.close() in finally block
-- Redowan's Reflections: running tqdm with multiprocessing — validates process_map() approach
-
-**Atomic File Operations:**
-- Crash-safe JSON (2026 dev.to): atomic writes + recovery patterns — validates tempfile + fsync + os.replace
-- BSWEN blog (2026-04-04): atomic file writing in Python — confirms no partial writes pattern
-
-### Tertiary (LOW confidence)
-
-**OCR Comparisons:**
-- Codesota (2026), TTSforFree (2026): Tesseract vs EasyOCR comparisons — used for stack selection but not critical to campaign features
-- DocSumo: OCR accuracy analysis — general benchmarks, not specific to this project
-
-**Source aggregation:** 60+ sources reviewed across 4 research files (STACK.md, FEATURES.md, ARCHITECTURE.md, PITFALLS.md); convergence across official docs, GitHub issues, Python tracker, and technical blogs provides HIGH confidence for campaign management recommendations. v1.0 baseline already validates OCR stack; v1.1 focuses on orchestration patterns which are well-documented in stdlib and community best practices.
-
----
-
-**Research completed:** 2026-06-05
-**Ready for roadmap:** Yes
-
-**Next steps for orchestrator:**
-1. Load SUMMARY.md as context for roadmap creation
-2. Use suggested 4-phase structure as starting point
-3. Apply research flags (all phases skip research-phase; Phase 2 needs extensive manual testing)
-4. Reference STACK.md, FEATURES.md, ARCHITECTURE.md, PITFALLS.md for detailed specifications during phase planning
-5. Note: v1.0 baseline already complete per CLAUDE.md; roadmap should focus on v1.1 campaign management additions only
+### 2026 OCR Landscape & Trends
+- [OCR 2026: Everything You Need to Know, Trends, Tools & Tips](https://www.makoletdigimarket.com/stop-retyping-how-ocr-in-2026-actually-works-and-where-its-going/)
+- [OCR Accuracy Benchmarks: The 2026 Digital Transformation Revolution](https://medium.com/@info_59976/ocr-accuracy-benchmarks-the-2026-digital-transformation-revolution-2f7095c2696f)
+- [The Definitive Guide to OCR in 2026: From Pipelines to VLMs](https://slavadubrov.github.io/blog/2026/03/04/the-definitive-guide-to-ocr-in-2026-from-pipelines-to-vlms/)

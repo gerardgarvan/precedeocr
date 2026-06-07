@@ -1,846 +1,640 @@
-# Pitfalls Research
+# Performance Optimization Pitfalls
 
-**Domain:** Adding Campaign Management to Multiprocessing OCR Pipeline (Windows 10)
-**Researched:** 2026-06-05
-**Confidence:** HIGH
+**Domain:** Adding performance optimizations to existing OCR batch pipeline
+**Researched:** 2026-06-07
+**Context:** v1.2 milestone adding performance optimizations to v1.1 baseline (94.9% accuracy, 230 tests passing)
+
+## Executive Summary
+
+Performance optimizations introduce subtle behavioral changes that can silently degrade accuracy while improving throughput. The critical risk is **trading proven 94.9% accuracy for speed gains** without detecting the regression until after processing thousands of files. PyMuPDF migration, Tesseract configuration changes, DPI reduction, and parallelism tuning all have accuracy cliffs where small parameter changes cause large quality drops. The existing checkpoint/resume system and test suite must remain compatible, and Windows 'spawn' mode multiprocessing adds platform-specific complexity.
+
+**Most dangerous pitfall:** PyMuPDF rendering differences that look visually identical but produce different OCR results downstream (detected only through accuracy measurement, not visual inspection).
+
+---
 
 ## Critical Pitfalls
 
-### Pitfall 1: Signal Handlers Execute Only in Main Thread (Windows spawn Method)
+Mistakes that cause rewrites, major accuracy regressions, or data loss.
 
-**What goes wrong:**
-When using multiprocessing on Windows (which uses the `spawn` start method), signal handlers registered with `signal.signal(signal.SIGINT, handler)` execute ONLY in the main thread of the main process. If the main thread is blocked waiting on `pool.join()` or a blocking iterator like `pool.imap()`, the handler won't execute until that blocking call completes, making the program unresponsive to Ctrl+C.
+### Pitfall 1: PyMuPDF Rendering Differences Breaking Downstream OCR
+**What goes wrong:** Images from PyMuPDF's `get_pixmap()` look visually identical to pdf2image output but produce different OCR results. Object detection models and Tesseract behave differently due to subtle PNG compression, color space, or alpha channel differences. **Accuracy can drop 5-10% without any visual warning.**
 
 **Why it happens:**
-Python's signal handling design restricts handler execution to the main thread of the main interpreter. On Windows, processes are spawned fresh (not forked), creating process isolation that prevents workers from receiving signals directly. Additionally, blocking calls like `pool.join()` prevent the main thread from processing signals until the call returns.
+- PyMuPDF uses different PNG compression parameters (10-20% smaller files)
+- Default color space handling differs (RGB vs GRAY vs CMYK)
+- Alpha channel behavior differs (`alpha=True` parameter semantics)
+- DPI/resolution translation not 1:1 (pdf2image defaults to 200 DPI, PyMuPDF uses scaling matrix)
+- CMYK color space PDFs may render incorrectly (MuPDF only supports Gray/RGB/CMYK, requires manual conversion)
 
-**How to avoid:**
-1. **Use non-blocking iteration with timeout checks**: Replace `pool.map()` with `pool.imap_unordered()` and iterate with small timeouts to allow signal processing:
-   ```python
-   it = pool.imap_unordered(process_pdf, pdf_files, chunksize=1)
-   while True:
-       try:
-           result = it.next(timeout=0.5)  # Check every 0.5s
-           # process result
-       except StopIteration:
-           break
-       except multiprocessing.TimeoutError:
-           continue  # Allow signal handler to run
-   ```
+**Consequences:**
+- Silent accuracy regression (visually correct images, wrong OCR results)
+- Preprocessing pipeline fails (OpenCV expects specific color space)
+- Rotation detection breaks (different pixel intensities change thresholding behavior)
+- Test suite passes visually but accuracy drops on real corpus
 
-2. **Replace blocking pool.join() with timed polling**:
-   ```python
-   pool.close()
-   while not shutdown_event.is_set():
-       pool.join(timeout=0.5)
-       if not pool._pool:  # Workers finished
-           break
-   ```
+**Prevention:**
+1. **Mandatory accuracy regression testing**: Run existing test corpus (230 tests + real samples) through PyMuPDF pipeline and compare accuracy metric to 94.9% baseline
+2. **Color space normalization**: Explicitly convert to RGB or GRAY after rendering: `pix = page.get_pixmap(colorspace="rgb")` or convert CMYK manually
+3. **Match pdf2image DPI exactly**: Use `mat = fitz.Matrix(dpi/72, dpi/72)` then `page.get_pixmap(matrix=mat)` to replicate 300 DPI behavior
+4. **Disable alpha channel initially**: Use `alpha=False` (default) to match pdf2image's non-transparent output
+5. **A/B testing on sample set**: Process 100 random PDFs with both pipelines, diff the OCR outputs, investigate any differences before full migration
 
-3. **Use apply_async with get(timeout)** instead of blocking map:
-   ```python
-   results = [pool.apply_async(func, (item,)) for item in items]
-   for result in results:
-       try:
-           value = result.get(timeout=0.5)
-       except multiprocessing.TimeoutError:
-           continue
-   ```
+**Detection:**
+- Accuracy metric drops below 94.9% on existing test corpus
+- Preprocessing failures increase (color space conversion errors)
+- Rotation detection success rate changes
+- Different character confusion patterns (O/0, I/1, S/5 ratios shift)
 
-**Warning signs:**
-- Program ignores Ctrl+C completely during `pool.join()` or `pool.map()` calls
-- Signal handler sets a flag but nothing responds until entire batch completes
-- Progress bars continue updating but program won't terminate
+**Phase assignment:** Phase 1 (PDF rendering migration) — must validate before proceeding to Phase 2
 
-**Phase to address:**
-Phase 1 (Signal Handler Infrastructure) — establish non-blocking patterns before building campaign menu
+**Sources:**
+- [How to match PyMuPdf output to pdf2image output? · pymupdf/PyMuPDF · Discussion #913](https://github.com/pymupdf/PyMuPDF/discussions/913)
+- [PyMuPDF Colorspace documentation](https://pymupdf.readthedocs.io/en/latest/colorspace.html)
+- [Features Comparison - PyMuPDF documentation](https://pymupdf.readthedocs.io/en/latest/about.html)
+
+**Confidence:** HIGH
 
 ---
 
-### Pitfall 2: Workers Inherit SIGINT and Terminate Prematurely
-
-**What goes wrong:**
-By default, worker processes in the same process group receive the SIGINT signal when Ctrl+C is pressed. If workers don't ignore the signal, they terminate immediately with `KeyboardInterrupt`, corrupting in-flight work, leaving incomplete checkpoint writes, and potentially causing the main process to hang waiting for results that will never arrive.
+### Pitfall 2: DPI Reduction Below Accuracy Threshold
+**What goes wrong:** Reducing rendering DPI from 300 to 200 or 150 to improve speed causes 20%+ accuracy drop on degraded scans. The accuracy cliff is sharp: 300 DPI → 94.9% accuracy, 200 DPI → ~75% accuracy on low-quality scans.
 
 **Why it happens:**
-Child processes are part of the same process group as the main process on Windows, so they receive Ctrl+C signals directly from the console. Python's default SIGINT handler raises `KeyboardInterrupt`, which terminates the worker before it can finish processing the current PDF or report back to the pool.
+- 300 DPI is the industry minimum for reliable OCR (2026 standard)
+- Below 300 DPI, small text and degraded scans lose critical detail
+- Tesseract's character recognition models trained on higher-DPI inputs
+- Preprocessing (thresholding, denoising) amplifies artifacts at low DPI
+- IDs are already small on page (~5 digits) — DPI reduction makes them sub-recognition threshold
 
-**How to avoid:**
-1. **Ignore SIGINT in worker initialization**:
-   ```python
-   import signal
+**Consequences:**
+- Massive accuracy regression on worst-quality scans (the hardest cases drop from 70% → 20%)
+- Preprocessing fallback becomes ineffective (can't recover lost detail)
+- Per-folder quality statistics show degradation in specific directories
+- Campaign reports highlight problem folders that were fine in v1.1
 
-   def init_worker():
-       signal.signal(signal.SIGINT, signal.SIG_IGN)
+**Prevention:**
+1. **Hard minimum of 300 DPI**: Never render below 300 DPI for OCR pipeline
+2. **Test on degraded scan corpus**: Validate any DPI changes specifically on low-quality test samples
+3. **DPI as tunable parameter**: Allow users to increase DPI (e.g., 400-600) for small text, not decrease below 300
+4. **Monitor per-folder accuracy**: Track which folders degrade with DPI changes
 
-   pool = multiprocessing.Pool(
-       processes=cpu_count() - 1,
-       initializer=init_worker
-   )
-   ```
+**Detection:**
+- Overall accuracy drops below 94.9% baseline
+- Per-folder statistics show specific directories with accuracy collapse
+- Preprocessing fallback success rate increases (more pages need fallback)
+- Campaign reports flag more "problem folders"
 
-2. **Let only the main process handle Ctrl+C**: With workers ignoring SIGINT, the main process signal handler sets a flag, workers check the flag periodically, and cleanup happens in controlled shutdown sequence.
+**Phase assignment:** Phase 1 (PDF rendering migration) — validate before optimizing Tesseract config
 
-3. **Use multiprocessing.Event for shutdown coordination**:
-   ```python
-   shutdown_event = multiprocessing.Event()
+**Sources:**
+- [OCR Accuracy Explained: How to Improve It](https://www.llamaindex.ai/blog/ocr-accuracy)
+- [OCR Accuracy: How Accurate Is OCR Data Extraction in 2026?](https://www.ocrdataextraction.com/accuracy)
+- [Enhancing OCR Accuracy in Low-Quality Scans](https://sparkco.ai/blog/enhancing-ocr-accuracy-in-low-quality-scans)
 
-   def worker(pdf_path, shutdown_event):
-       if shutdown_event.is_set():
-           return None  # Skip this work
-       # ... process PDF ...
-
-   def signal_handler(sig, frame):
-       shutdown_event.set()
-       print("\nShutdown requested, finishing current files...")
-   ```
-
-**Warning signs:**
-- Workers terminate mid-PDF leaving partial results
-- Checkpoint file contains only half the expected data
-- `BrokenProcessPool` or `TerminatedWorkerError` exceptions
-- Main process hangs after Ctrl+C because workers died without reporting
-
-**Phase to address:**
-Phase 1 (Signal Handler Infrastructure) — must be implemented before any Ctrl+C handling
+**Confidence:** HIGH
 
 ---
 
-### Pitfall 3: Pool Cleanup Order Causes Deadlock or Corruption
-
-**What goes wrong:**
-Calling `pool.terminate()` before draining result iterators (from `imap()`, `imap_unordered()`, or pending `apply_async` results) can cause deadlock or queue corruption. Workers may be killed while holding locks or writing to queues, leaving the main process blocked trying to read results that will never arrive. Conversely, calling `pool.join()` without first calling `pool.close()` hangs indefinitely if workers are still accepting new tasks.
+### Pitfall 3: Tesseract Config Changes Silent Accuracy Regressions
+**What goes wrong:** Changing Tesseract PSM, OEM, or character whitelist to improve speed causes subtle accuracy regressions. Character whitelist (`tessedit_char_whitelist=0123456789`) sometimes **completely ignored** or causes empty output. PSM changes alter segmentation behavior, breaking multi-ID detection. OEM mode changes (legacy vs LSTM) trade speed for accuracy.
 
 **Why it happens:**
-The multiprocessing documentation warns: "If this method is used when the associated process is using a pipe or queue then the pipe or queue is liable to become corrupted and may become unusable by other process." Abrupt termination with `terminate()` doesn't allow workers to flush buffers, release locks, or signal completion. The result queue can fill up, blocking workers from returning, while the main thread waits on `terminate()` to complete.
+- Character whitelist bugs: documented issues where whitelist ignored or returns empty strings (Tesseract GitHub #3759)
+- PSM mode mismatches: PSM 6 (default, full page) vs PSM 7 (single line) vs PSM 8 (single word) — wrong mode misses IDs
+- OEM mode tradeoffs: Legacy engine (OEM 0) faster but less accurate, LSTM (OEM 1) slower but more accurate
+- Config interactions: Some config combinations incompatible (whitelist + certain OEM modes fail)
+- Version-specific behavior: Tesseract 4.x vs 5.x handle config differently
 
-**How to avoid:**
-1. **Follow strict cleanup sequence**:
-   ```python
-   # CORRECT ORDER:
-   pool.close()              # 1. Prevent new tasks
-   pool.join(timeout=30)     # 2. Wait for workers (with timeout)
-   if pool._pool:            # 3. Check if workers finished
-       pool.terminate()      # 4. Force kill if timeout
-       pool.join()           # 5. Wait for termination
-   ```
+**Consequences:**
+- Silent character misrecognition (whitelist fails, Tesseract reads letters as digits)
+- Empty OCR results on valid pages (whitelist returns empty string bug)
+- Multi-ID pages lose IDs (PSM 7/8 too restrictive, only finds first ID)
+- Speed improvement with accuracy regression (OEM 0 faster but wrong results)
 
-2. **Always drain iterators before cleanup**:
-   ```python
-   results = []
-   try:
-       for result in pool.imap_unordered(func, items):
-           results.append(result)
-   except KeyboardInterrupt:
-       pass  # Allow iterator to exit cleanly
-   finally:
-       pool.close()
-       pool.join(timeout=10)
-       if pool._pool:
-           pool.terminate()
-           pool.join()
-   ```
+**Prevention:**
+1. **Test config changes on full corpus**: Run 230-test suite + real samples with each config change
+2. **Validate whitelist actually works**: Check that output contains only 0-9, no letters, no empty results
+3. **Preserve PSM 6 for multi-ID pages**: Only use PSM 7/8 if single-ID-per-page guaranteed (current corpus has multi-ID pages per FEATURES.md)
+4. **Stick with OEM 3 (default)**: Avoid legacy engine (OEM 0) unless speed gain worth accuracy risk
+5. **Log config parameters in checkpoint**: Track which Tesseract config produced each result for debugging
 
-3. **Use context manager for automatic cleanup**:
-   ```python
-   with multiprocessing.Pool(processes=N, initializer=init_worker) as pool:
-       results = list(pool.imap_unordered(func, items))
-   # close() and join() called automatically
-   ```
+**Detection:**
+- Test suite failures (expected IDs not found)
+- Empty results increase (whitelist bug)
+- Multi-ID pages report fewer IDs than v1.1
+- Character confusion patterns change (letters in output when whitelist should block)
 
-**Warning signs:**
-- Program hangs indefinitely on exit after Ctrl+C
-- `RuntimeError: Queue objects should only be shared between processes through inheritance` messages
-- Workers show as "zombie" processes in Task Manager
-- tqdm progress bar freezes but processes still running
+**Phase assignment:** Phase 2 (Tesseract optimization) — requires careful A/B testing
 
-**Phase to address:**
-Phase 1 (Signal Handler Infrastructure) — establish proper cleanup patterns from the start
+**Sources:**
+- [Tesseract misses whitelisted characters · Issue #3759](https://github.com/tesseract-ocr/tesseract/issues/3759)
+- [Limiting Characters in Tesseract OCR: Complete Guide to 2026 Best Practices](https://copyprogramming.com/howto/limit-characters-tesseract-is-looking-for)
+- [Tesseract Page Segmentation Modes (PSMs) Explained](https://pyimagesearch.com/2021/11/15/tesseract-page-segmentation-modes-psms-explained-how-to-improve-your-ocr-accuracy/)
+- [Tuning Tesseract PSM and OEM for Precise OCR Character Recognition](https://sqlpey.com/python/tesseract-psm-oem-tuning/)
+
+**Confidence:** HIGH
 
 ---
 
-### Pitfall 4: Checkpoint Corruption from Concurrent Writes or Missing fsync
-
-**What goes wrong:**
-On Windows, `os.replace()` is "usually" atomic but can silently fall back to non-atomic `CopyFile` in some cases. Without `flush()` + `fsync()` before calling `os.replace()`, data may still be in kernel buffers when the checkpoint file is moved, resulting in incomplete or corrupted checkpoint data after a crash. Additionally, if multiple workers or the main thread try to update the checkpoint concurrently, race conditions can corrupt the state file.
+### Pitfall 4: Unnecessary Preprocessing Degrading Clean Scans
+**What goes wrong:** Applying aggressive preprocessing (adaptive thresholding, morphological operations) to clean scans **reduces accuracy** instead of improving it. Over-preprocessing destroys fine detail, introduces artifacts, and causes Tesseract to misread clear text.
 
 **Why it happens:**
-Windows' `MoveFileEx` operation (used by `os.replace()`) guarantees atomicity only when source and destination are on the same volume and meet other conditions. Python's `flush()` only flushes to the OS buffer, not to physical disk. Multiprocessing with the `spawn` method creates truly separate processes that can simultaneously attempt checkpoint writes if not coordinated.
+- Current pipeline uses **conditional preprocessing** (fallback only when initial OCR fails)
+- Performance optimizations may apply preprocessing unconditionally for "consistency"
+- Adaptive thresholding on clean scans creates false edges and noise
+- Morphological operations (erosion/dilation) distort character shapes on high-quality images
+- Gaussian blur on sharp scans loses detail
 
-**How to avoid:**
-1. **Ensure atomic writes with fsync on Windows**:
-   ```python
-   import os
-   import tempfile
-   from pathlib import Path
+**Consequences:**
+- Accuracy drops 5-10% on clean scans (the majority of corpus)
+- Best-case performance degrades to improve worst-case (net negative)
+- Per-folder statistics show clean folders regressing
+- Test suite failures on previously-passing clean samples
 
-   def atomic_write_checkpoint(checkpoint_path, data):
-       checkpoint_dir = checkpoint_path.parent
-       with tempfile.NamedTemporaryFile(
-           mode='w',
-           dir=checkpoint_dir,  # Same filesystem as target
-           delete=False,
-           suffix='.tmp'
-       ) as tmp_file:
-           json.dump(data, tmp_file, indent=2)
-           tmp_file.flush()
-           os.fsync(tmp_file.fileno())  # CRITICAL on Windows
-           tmp_path = Path(tmp_file.name)
+**Prevention:**
+1. **Preserve conditional preprocessing**: Keep v1.1 behavior (preprocess only on OCR failure)
+2. **Test preprocessing on clean samples**: Validate that clean scans maintain 94.9%+ accuracy
+3. **Separate clean vs degraded test sets**: Track accuracy separately for each quality tier
+4. **Profile preprocessing overhead**: Measure if conditional preprocessing is actually slower (likely not)
 
-       # Atomic replace (mostly atomic on Windows)
-       os.replace(tmp_path, checkpoint_path)
+**Detection:**
+- Accuracy drops on clean scans (test suite failures)
+- Per-folder statistics show clean folders regressing
+- Visual inspection shows artifacts (false edges, character distortion)
 
-       # Sync directory metadata (POSIX only, no-op on Windows)
-       try:
-           dir_fd = os.open(checkpoint_dir, os.O_RDONLY)
-           os.fsync(dir_fd)
-           os.close(dir_fd)
-       except (OSError, AttributeError):
-           pass  # Windows doesn't support directory fsync
-   ```
+**Phase assignment:** Phase 2/3 (Tesseract/preprocessing optimization) — preserve existing behavior
 
-2. **Centralize checkpoint writes in main process only**:
-   ```python
-   # GOOD: Workers return results, main process updates checkpoint
-   def main():
-       for result in pool.imap_unordered(process_pdf, pdfs):
-           state['processed'].append(result['filename'])
-           atomic_write_checkpoint(checkpoint_path, state)
+**Sources:**
+- [Preprocessing Images to Improve OCR & DarkShield Results - IRI](https://www.iri.com/blog/data-protection/preprocessing-images-for-ocr-darkshield/)
+- [Improve OCR accuracy using advanced preprocessing techniques](https://www.nitorinfotech.com/blog/improve-ocr-accuracy-using-advanced-preprocessing-techniques/)
+- [PreP-OCR: A Complete Pipeline for Document Image Restoration and Enhanced OCR Accuracy](https://arxiv.org/html/2505.20429v1)
 
-   # BAD: Workers directly write to checkpoint (race condition)
-   def worker(pdf_path, checkpoint_path):  # DANGEROUS
-       result = process_pdf(pdf_path)
-       update_checkpoint(checkpoint_path, result)  # RACE!
-   ```
-
-3. **Use file locks if workers must write**:
-   ```python
-   from filelock import FileLock
-
-   lock_path = checkpoint_path.with_suffix('.lock')
-   with FileLock(lock_path, timeout=10):
-       state = load_checkpoint(checkpoint_path)
-       state['processed'].append(pdf_filename)
-       atomic_write_checkpoint(checkpoint_path, state)
-   ```
-
-**Warning signs:**
-- Checkpoint file has `{}` or partial JSON after crash
-- Resume skips files or processes duplicates
-- `PermissionError` or `FileNotFoundError` on checkpoint reads
-- Checkpoint file exists but `json.load()` raises `JSONDecodeError`
-
-**Phase to address:**
-Phase 1 (Signal Handler Infrastructure) — verify checkpoint atomicity before adding campaign state complexity
+**Confidence:** MEDIUM (based on general preprocessing best practices, not project-specific data)
 
 ---
 
-### Pitfall 5: imap/imap_unordered Deadlock on Generator Exceptions (Python <3.5)
-
-**What goes wrong:**
-When `pool.imap()` or `pool.imap_unordered()` receive a generator that raises an exception during iteration, the `_task_handler` thread dies without notifying worker threads or the main thread. This causes the application to hang indefinitely, with workers waiting for tasks and the main thread waiting for results that will never arrive.
+### Pitfall 5: Rotation Strategy Changes Breaking Multi-ID Pages
+**What goes wrong:** Optimizing rotation strategy to reduce OCR passes (from 4 rotations to 2, or using OSD auto-detect) causes multi-ID pages to miss IDs. Different IDs on same page may require different rotations. OSD auto-detect is **unreliable** (fails 20% of time per Tesseract #4426).
 
 **Why it happens:**
-Prior to Python 3.5, exceptions from the iterator passed to `imap()` weren't properly handled. The `_task_handler` thread would crash without cleanup, leaving workers blocked on empty queues and the main thread blocked on result iteration.
+- Current multi-rotation strategy: try 90°, 270°, 0°, 180° until regex validates `\d{5}`
+- Optimization attempts: Use OSD to detect rotation once, skip other angles
+- OSD unreliability: Tesseract 5.3.1 OSD randomly fails ~20% of time on same input
+- Multi-ID pages: If page has IDs at 90° and 270°, single rotation detection misses one
+- Regex validation is the **reliable signal** — OSD is not
 
-**How to avoid:**
-1. **Upgrade to Python 3.5+**: The issue was fixed in March 2015. If running Python 3.4 or earlier, upgrade immediately.
+**Consequences:**
+- IDs missed on multi-ID pages (only find first ID, skip others)
+- Accuracy drops on rotated pages (OSD guesses wrong, skips correct rotation)
+- Test suite failures on multi-ID test cases
+- Campaign reports show increased "no ID found" pages
 
-2. **Wrap generator in exception handler**:
-   ```python
-   def safe_pdf_generator(pdf_dir):
-       try:
-           for pdf_path in Path(pdf_dir).rglob("*.pdf"):
-               yield pdf_path
-       except Exception as e:
-           logging.error(f"Generator failed: {e}")
-           return  # Clean exit instead of exception
+**Prevention:**
+1. **Keep 4-rotation strategy**: Multi-rotation with regex validation is robust
+2. **Avoid OSD for initial detection**: OSD documented as unreliable (Tesseract #4426)
+3. **Early-exit on regex match**: Once `\d{5}` found, stop trying rotations (already implemented?)
+4. **Profile actual rotation overhead**: 4 OCR passes on 5-digit IDs may be faster than OSD + 1 pass
+5. **Test multi-ID pages specifically**: Validate any rotation changes on multi-ID test corpus
 
-   # Use with imap_unordered
-   for result in pool.imap_unordered(process_pdf, safe_pdf_generator(pdf_dir)):
-       ...
-   ```
+**Detection:**
+- Multi-ID test cases fail (expected 2+ IDs, found only 1)
+- "No ID found" rate increases on rotated pages
+- Per-folder statistics show rotation detection failures
 
-3. **Use list instead of generator if uncertain**:
-   ```python
-   # SAFE: Pre-compute list before passing to pool
-   pdf_files = list(Path(pdf_dir).rglob("*.pdf"))
-   for result in pool.imap_unordered(process_pdf, pdf_files):
-       ...
-   ```
+**Phase assignment:** Phase 3 (Rotation optimization) — risky change, requires thorough testing
 
-4. **Add timeout to detect hangs**:
-   ```python
-   it = pool.imap_unordered(process_pdf, pdf_generator())
-   while True:
-       try:
-           result = it.next(timeout=60)  # 60s timeout
-       except StopIteration:
-           break
-       except multiprocessing.TimeoutError:
-           logging.error("Pool appears hung, no results in 60s")
-           break
-   ```
+**Sources:**
+- [Poor Rotation / Layout detection · Issue #4426](https://github.com/tesseract-ocr/tesseract/issues/4426)
+- [Page Segmentation Mode 0 -- Orientation and script detection (OSD) only Failed · Issue #202](https://github.com/tesseract-ocr/tesseract/issues/202)
+- [OSD with --psm 0 creates wrong result in latest version · Issue #1926](https://github.com/tesseract-ocr/tesseract/issues/1926)
 
-**Warning signs:**
-- Progress bar stops updating mid-batch
-- Workers show CPU usage but no results produced
-- `pool.join()` never returns
-- No exceptions raised but program doesn't terminate
-
-**Phase to address:**
-Phase 2 (Interactive Campaign Menu) — ensure generator safety before adding resume-from-failure logic that relies on robust iteration
+**Confidence:** HIGH
 
 ---
 
-### Pitfall 6: Shared Manager Objects Create Performance Bottleneck
-
-**What goes wrong:**
-Using `multiprocessing.Manager()` to share dictionaries, counters, or statistics across workers introduces massive overhead because every read and write requires inter-process communication (IPC) with the manager process. This serializes access and can reduce parallel performance by 10-100x compared to local aggregation patterns.
+### Pitfall 6: Checkpoint Format Incompatibility Breaking Resume
+**What goes wrong:** Changes to internal data structures (PDF renderer, OCR results format) break checkpoint/resume compatibility. Users lose partial progress when upgrading from v1.1 to v1.2 mid-campaign.
 
 **Why it happens:**
-Manager proxies don't share memory directly; they send messages to a separate manager process that holds the actual data. Each `stats['processed'] += 1` involves: (1) serialize request, (2) IPC to manager, (3) manager updates, (4) IPC back to worker, (5) deserialize response. High-frequency updates create an IPC storm.
+- v1.1 checkpoint format assumes pdf2image behavior (specific metadata)
+- PyMuPDF migration may change image metadata stored in checkpoint
+- Config changes (Tesseract PSM/OEM) may require re-processing to maintain consistency
+- JSON schema changes without migration path
 
-**How to avoid:**
-1. **Use local counters, aggregate at end**:
-   ```python
-   def process_pdf_batch(pdf_paths):
-       """Each worker maintains local stats"""
-       local_stats = {'processed': 0, 'failed': 0, 'ids_found': 0}
-       results = []
+**Consequences:**
+- Checkpoint files from v1.1 unreadable in v1.2 (schema mismatch)
+- Users forced to restart 30K-file campaigns from scratch
+- Data loss if mid-campaign upgrade attempted
+- Corruption if v1.2 writes to v1.1 checkpoint file
 
-       for pdf_path in pdf_paths:
-           result = process_single_pdf(pdf_path)
-           results.append(result)
-           local_stats['processed'] += 1
-           if result['success']:
-               local_stats['ids_found'] += len(result['ids'])
-           else:
-               local_stats['failed'] += 1
+**Prevention:**
+1. **Version checkpoints**: Add `"version": "1.2"` to checkpoint JSON schema
+2. **Graceful migration**: Detect v1.1 checkpoints, either migrate or warn user to finish campaign first
+3. **Schema compatibility testing**: Load v1.1 checkpoints in v1.2 code, verify no crashes
+4. **Separate checkpoint files per version**: Use `campaign_state_v1.2.json` instead of overwriting `campaign_state.json`
+5. **Document upgrade path**: In README, warn users to complete in-progress campaigns before upgrading
 
-       return {'results': results, 'stats': local_stats}
+**Detection:**
+- JSON decode errors when loading checkpoint
+- KeyError/AttributeError when accessing checkpoint fields
+- Corrupted checkpoint files (partial writes during migration)
 
-   # Main process aggregates
-   total_stats = {'processed': 0, 'failed': 0, 'ids_found': 0}
-   for batch_result in pool.imap_unordered(process_pdf_batch, batches):
-       for key in total_stats:
-           total_stats[key] += batch_result['stats'][key]
-   ```
+**Phase assignment:** Phase 1 (PyMuPDF migration) — validate checkpoint compatibility before release
 
-2. **Use Queue for periodic updates instead of Manager**:
-   ```python
-   stats_queue = multiprocessing.Queue()
+**Sources:**
+- [Backward Compatibility in Schema Evolution: Guide](https://www.dataexpert.io/blog/backward-compatibility-schema-evolution-guide)
+- [Schema Evolution & Compatibility Types | Confluent Documentation](https://docs.confluent.io/platform/current/schema-registry/fundamentals/schema-evolution.html)
+- [How to Implement API Versioning and Backward Compatibility](https://technori.com/2026/03/25054-how-to-implement-api-versioning-and-backward-compatibility/ava/)
 
-   def worker(pdf_path, stats_queue):
-       result = process_pdf(pdf_path)
-       stats_queue.put({
-           'type': 'completion',
-           'success': result['success'],
-           'ids_found': len(result['ids'])
-       })
-       return result
-
-   # Main process aggregates from queue
-   def update_stats_from_queue(stats_queue, total_stats):
-       while not stats_queue.empty():
-           try:
-               update = stats_queue.get_nowait()
-               total_stats['processed'] += 1
-               if update['success']:
-                   total_stats['ids_found'] += update['ids_found']
-               else:
-                   total_stats['failed'] += 1
-           except queue.Empty:
-               break
-   ```
-
-3. **Avoid Manager unless truly needed**:
-   ```python
-   # BAD: High overhead for simple counter
-   manager = multiprocessing.Manager()
-   shared_stats = manager.dict({'processed': 0})
-
-   def worker(pdf):
-       result = process_pdf(pdf)
-       shared_stats['processed'] += 1  # IPC on every PDF!
-       return result
-
-   # GOOD: Return stats with result
-   def worker(pdf):
-       result = process_pdf(pdf)
-       return {'pdf': pdf, 'result': result, 'stats': 1}
-   ```
-
-**Warning signs:**
-- Pool performance degrades as worker count increases (should improve)
-- High CPU usage in main process or manager process, low in workers
-- `htop` shows workers blocked on IPC calls
-- Processing 30K PDFs takes hours instead of minutes
-
-**Phase to address:**
-Phase 3 (Statistics Tracking) — design stats collection architecture to avoid Manager antipattern
+**Confidence:** MEDIUM (general software engineering risk, not OCR-specific)
 
 ---
 
-### Pitfall 7: tqdm Progress Bars Leak or Corrupt on Pool Termination
+## Moderate Pitfalls
 
-**What goes wrong:**
-When a multiprocessing Pool is terminated abruptly (via `terminate()` or Ctrl+C without proper cleanup), tqdm progress bars may not close cleanly, leaving terminal formatting corrupted (missing newlines, cursor in wrong position, ANSI codes visible). Additionally, using tqdm with `pool.imap()` without proper cleanup can leak file descriptors or leave progress bar processes running as zombies.
+Mistakes that cause performance degradation, increased failures, or maintenance burden.
+
+### Pitfall 7: Hybrid CPU Over-Subscription on Windows
+**What goes wrong:** Setting worker pool to `cpu_count()` (20 cores) on hybrid CPU (8 P-cores + 12 E-cores) causes **worse** performance than fewer workers. E-cores slower for OCR workload, process scheduler thrashes, memory bandwidth saturated.
 
 **Why it happens:**
-tqdm's multiprocessing support relies on proper cleanup sequences. Calling `pool.terminate()` kills worker processes before they can call `tqdm.close()`, leaving terminal state dirty. The tqdm-multiprocess library spawns additional processes for progress bars that must be explicitly closed.
+- Windows 10 scheduler may not distinguish P-cores vs E-cores optimally
+- E-cores are 40-60% slower for CPU-intensive tasks (OCR)
+- 20 workers contend for memory bandwidth (PDF loading, image buffers)
+- Windows 'spawn' mode creates fresh Python interpreter per worker (higher overhead than Linux 'fork')
+- Context switching overhead increases with worker count
 
-**How to avoid:**
-1. **Always close tqdm before pool termination**:
-   ```python
-   from tqdm import tqdm
+**Consequences:**
+- Total throughput **decreases** with more workers (counterintuitive)
+- Memory pressure increases (20 concurrent PDF loads)
+- System becomes unresponsive (scheduler thrashing)
+- Workers spend more time in I/O wait than processing
 
-   pbar = None
-   try:
-       pbar = tqdm(total=len(pdf_files), desc="Processing PDFs")
-       for result in pool.imap_unordered(process_pdf, pdf_files):
-           pbar.update(1)
-   finally:
-       if pbar:
-           pbar.close()  # CRITICAL: Close before pool cleanup
-       pool.close()
-       pool.join(timeout=10)
-   ```
+**Prevention:**
+1. **Benchmark worker counts**: Test 4, 8, 12, 16, 20 workers, measure total throughput
+2. **Start with P-core count**: Use 8 workers (P-core count) as baseline
+3. **Profile CPU utilization**: Check if P-cores at 100% and E-cores idle (indicates scheduler issue)
+4. **Add `--workers` CLI flag**: Let users tune based on their CPU architecture
+5. **Document optimal setting**: In README, recommend 8-12 workers for hybrid CPUs
 
-2. **Use tqdm context manager**:
-   ```python
-   with tqdm(total=len(pdf_files)) as pbar:
-       for result in pool.imap_unordered(process_pdf, pdf_files):
-           pbar.update(1)
-   # tqdm.close() called automatically
-   ```
+**Detection:**
+- Throughput decreases when workers increase from 8 → 20
+- Task Manager shows high E-core usage, low P-core usage (scheduler misallocating)
+- Memory usage spikes (>16GB with 20 workers)
+- System responsiveness degrades
 
-3. **Handle Ctrl+C in tqdm loop**:
-   ```python
-   pbar = tqdm(total=len(pdf_files))
-   try:
-       for result in pool.imap_unordered(process_pdf, pdf_files):
-           pbar.update(1)
-   except KeyboardInterrupt:
-       pbar.write("\nShutdown requested, cleaning up...")
-   finally:
-       pbar.close()
-       # ... pool cleanup ...
-   ```
+**Phase assignment:** Phase 4 (Parallelism tuning) — requires benchmarking on target hardware
 
-4. **If using tqdm-multiprocess, call shutdown explicitly**:
-   ```python
-   from tqdm_multiprocess import TqdmMultiProcessPool
+**Sources:**
+- [What Is Performance Hybrid Architecture?](https://www.intel.com/content/www/us/en/support/articles/000091896/processors.html)
+- [Hybrid CPU Performance on Windows 10 and 11 – Alois Kraus](https://aloiskraus.wordpress.com/2024/02/08/hybrid-cpu-performance-on-windows-10-and-11/)
+- [CPU Efficiency Cores vs Performance Cores: Why Are They Different?](https://www.corsair.com/us/en/explorer/gamer/gaming-pcs/cpu-efficiency-cores-vs-performance-cores-why-are-they-different/)
 
-   pool = TqdmMultiProcessPool()
-   try:
-       # ... work ...
-   finally:
-       pool.shutdown()  # Cleans up progress bar processes
-   ```
-
-**Warning signs:**
-- Terminal shows `^C` characters or ANSI codes after Ctrl+C
-- Cursor positioned in middle of screen after program exits
-- Progress bar remains visible after program terminates
-- Need to run `reset` command to fix terminal
-- Zombie processes with `tqdm` in command name
-
-**Phase to address:**
-Phase 2 (Interactive Campaign Menu) — ensure tqdm cleanup works before adding more interactive elements
+**Confidence:** HIGH
 
 ---
 
-### Pitfall 8: Windows Signal Limitations Break Cross-Platform Code
-
-**What goes wrong:**
-Code that works on Linux with signals like `SIGUSR1`, `SIGTERM`, `SIGHUP` fails on Windows with `ValueError: signal number out of range`. Windows only supports `SIGABRT`, `SIGFPE`, `SIGILL`, `SIGINT`, `SIGSEGV`, `SIGTERM`, and `SIGBREAK`. Additionally, on Windows, processes receive `SIGBREAK` (Ctrl+Break) instead of POSIX signals for console control events.
+### Pitfall 8: Memory Leaks from Worker Pool Not Closed Properly
+**What goes wrong:** Failing to close multiprocessing.Pool with context manager or explicit `close()`/`terminate()` causes memory to accumulate unbounded until OOM crash mid-campaign.
 
 **Why it happens:**
-Windows is not POSIX-compliant and implements only a subset of signals. Most POSIX signals (SIGUSR1, SIGHUP, SIGPIPE, etc.) don't exist on Windows. Signal delivery mechanisms differ fundamentally between Windows console control events and POSIX signals.
+- `Pool._cache` holds MapResults indefinitely if pool not closed
+- Workers hold references to processed images/data
+- Garbage collector cannot reclaim memory until pool terminated
+- Historical Python bug (fixed but behavior depends on proper usage)
 
-**How to avoid:**
-1. **Stick to cross-platform signals**:
-   ```python
-   import signal
-   import sys
+**Consequences:**
+- Memory usage grows linearly with processed files (instead of staying constant)
+- OOM crash after thousands of files (campaign fails mid-run)
+- Checkpoint saves before crash, but restart hits same issue
+- System swap thrashing (Windows page file exhaustion)
 
-   def setup_signal_handlers():
-       signal.signal(signal.SIGINT, handle_shutdown)
-       signal.signal(signal.SIGTERM, handle_shutdown)
+**Prevention:**
+1. **Use context manager**: `with Pool(processes=N) as pool:` (auto-cleanup)
+2. **Explicit cleanup**: If not using context manager, call `pool.close()` and `pool.join()` in `finally:` block
+3. **Worker recycling**: Use `maxtasksperchild=100` to recycle workers every 100 PDFs (prevents worker-level leaks)
+4. **Monitor memory growth**: Profile memory usage over 1000 files, verify it plateaus
+5. **Graceful shutdown**: Ensure Ctrl+C handler closes pool before exit
 
-       # Windows-specific: SIGBREAK (Ctrl+Break)
-       if sys.platform == 'win32':
-           signal.signal(signal.SIGBREAK, handle_shutdown)
+**Detection:**
+- Memory usage grows linearly with processed files (Task Manager)
+- OOM crash after N thousand files (N depends on RAM)
+- Workers not terminating after campaign complete
+- Python process memory >16GB (should plateau around 2-4GB)
 
-       # DON'T: SIGUSR1 doesn't exist on Windows
-       # signal.signal(signal.SIGUSR1, handle_reload)  # ValueError on Windows!
-   ```
+**Phase assignment:** Phase 1/4 (Parallelism implementation) — validate before scaling to full corpus
 
-2. **Use multiprocessing.Event instead of signals for worker coordination**:
-   ```python
-   # GOOD: Cross-platform shutdown coordination
-   shutdown_event = multiprocessing.Event()
+**Sources:**
+- [Memory Leak in Python multiprocessing.Pool - KK's Blog](https://fromkk.com/posts/memory-leak-in-python-multiprocessing-dot-pool/)
+- [Issue 34172: multiprocessing.Pool and ThreadPool leak resources after being deleted](https://bugs.python.org/issue34172)
+- [How Do I Limit Memory Consumption While Using Python Multiprocessing?](https://techbullion.com/how-do-i-limit-memory-consumption-while-using-python-multiprocessing/)
+- [Top Strategies to Manage High Memory Usage with Python Multiprocessing](https://sqlpey.com/python/top-strategies-to-manage-high-memory-usage-with-python-multiprocessing/)
 
-   def worker(pdf_path, shutdown_event):
-       if shutdown_event.is_set():
-           return None
-       # ... process ...
-
-   def handle_ctrl_c(sig, frame):
-       shutdown_event.set()
-   ```
-
-3. **Document platform-specific behavior**:
-   ```python
-   def graceful_shutdown():
-       """
-       Initiate graceful shutdown.
-
-       On Windows: Triggered by Ctrl+C (SIGINT) or Ctrl+Break (SIGBREAK)
-       On POSIX: Triggered by SIGINT or SIGTERM
-       """
-       shutdown_event.set()
-   ```
-
-**Warning signs:**
-- Code works on Linux/Mac but crashes on Windows with signal errors
-- `ValueError: signal number out of range` exceptions
-- Signal handlers registered but never called on Windows
-- Ctrl+Break behaves differently than Ctrl+C
-
-**Phase to address:**
-Phase 1 (Signal Handler Infrastructure) — verify Windows compatibility immediately
+**Confidence:** HIGH
 
 ---
 
-### Pitfall 9: Interactive Menu Blocks Signal Handling During input()
-
-**What goes wrong:**
-When the main thread is blocked on `input("Select option: ")`, it cannot process signals, making the program unresponsive to Ctrl+C. Users pressing Ctrl+C during the menu prompt see no response, leading to force-kill via Task Manager. This is especially problematic if workers are running in the background during menu display.
+### Pitfall 9: Windows Spawn Mode Pickling Failures
+**What goes wrong:** Windows 'spawn' mode requires all worker function arguments to be picklable. Passing unpicklable objects (lambdas, local functions, open file handles, compiled regexes in closures) causes cryptic PicklingError crashes.
 
 **Why it happens:**
-Python's `input()` is a blocking syscall that doesn't return until Enter is pressed. Signal handlers execute in the main thread, but only when the thread is executing Python bytecode or at specific interruption points. The `input()` syscall doesn't provide these interruption points on Windows.
+- Windows uses 'spawn' start method (not 'fork') — fresh interpreter per worker
+- All function arguments serialized via pickle and sent to worker process
+- Lambdas, nested functions, closures not picklable
+- Compiled regex patterns (`re.compile()`) picklable only if module-level
+- Open file handles (PDFs) not picklable
 
-**How to avoid:**
-1. **Don't run interactive menu while workers are active**:
-   ```python
-   # GOOD: Menu appears only when pool is idle
-   def main():
-       while True:
-           # Show menu
-           choice = input("Select: [1] Start [2] Stats [3] Quit: ")
+**Consequences:**
+- PicklingError crashes at pool startup or task submission
+- Cryptic error messages (doesn't clearly explain what's not picklable)
+- Code works in testing (small scale) but fails at production scale
+- Hard to debug (depends on internal structure of passed objects)
 
-           if choice == '1':
-               run_campaign()  # Blocks until complete or Ctrl+C
-           elif choice == '2':
-               show_stats()
-           elif choice == '3':
-               break
+**Prevention:**
+1. **Module-level functions only**: Define worker functions at module level, not nested
+2. **Module-level regex**: `PRECEDE_ID_REGEX = re.compile(r'\d{5}')` at module level
+3. **Pass paths not handles**: Pass `str` path to PDF, open inside worker function
+4. **Avoid closures**: Don't capture variables from outer scope in worker functions
+5. **Test pickling explicitly**: `pickle.dumps(worker_func)` to verify picklability before pool.map()
 
-   # BAD: Menu while workers running
-   def main():
-       pool.map_async(process_pdf, pdfs)  # Workers running!
-       choice = input("Select option: ")  # Can't Ctrl+C here
-   ```
+**Detection:**
+- PicklingError at pool.map() call
+- `AttributeError: Can't pickle local object` errors
+- Workers fail to start (pool.map() hangs then errors)
 
-2. **Use timeout-based input alternative for active campaigns**:
-   ```python
-   import sys
-   import select
+**Phase assignment:** Phase 1/4 (Parallelism implementation) — Windows-specific constraint
 
-   def input_with_timeout(prompt, timeout=1.0):
-       """
-       Input with timeout - allows periodic signal checking.
-       Note: select.select doesn't work with stdin on Windows.
-       Windows alternative uses msvcrt.
-       """
-       if sys.platform == 'win32':
-           import msvcrt
-           print(prompt, end='', flush=True)
-           chars = []
-           while True:
-               if msvcrt.kbhit():
-                   char = msvcrt.getwche()
-                   if char == '\r':  # Enter
-                       print()
-                       return ''.join(chars)
-                   chars.append(char)
-               time.sleep(0.1)  # Allow signal processing
-       else:
-           print(prompt, end='', flush=True)
-           ready, _, _ = select.select([sys.stdin], [], [], timeout)
-           if ready:
-               return sys.stdin.readline().strip()
-           return None
-   ```
+**Sources:**
+- [Fix: Python multiprocessing Not Working (freeze_support, Pickle Errors, Zombie Processes)](https://fixdevs.com/blog/python-multiprocessing-not-working/)
+- [Python Multiprocessing, Revisited: Fork vs Spawn](https://medium.com/@Nexumo_/python-multiprocessing-revisited-fork-vs-spawn-5b9216fd5710)
+- [multiprocessing — Process-based parallelism](https://docs.python.org/3/library/multiprocessing.html)
 
-3. **Show live status instead of blocking menu during processing**:
-   ```python
-   # GOOD: Status updates + Ctrl+C to interrupt
-   def run_campaign(pdf_files):
-       print("Processing PDFs... Press Ctrl+C to stop")
-       print("Current progress: [shown via tqdm]")
-
-       for result in pool.imap_unordered(process_pdf, pdf_files):
-           # ... updates ...
-           # Ctrl+C caught in signal handler, sets shutdown_event
-
-       print("\nCampaign complete. Returning to menu...")
-   ```
-
-**Warning signs:**
-- Ctrl+C during menu does nothing
-- Users report program "freezes" at menu
-- Need Task Manager to kill program
-- Workers running but can't interrupt from menu
-
-**Phase to address:**
-Phase 2 (Interactive Campaign Menu) — design menu flow to avoid blocking during active work
+**Confidence:** HIGH
 
 ---
 
-### Pitfall 10: Per-Folder Statistics Require Directory Handle Management
-
-**What goes wrong:**
-Tracking statistics per directory requires mapping results back to their source folders, which breaks if PDF paths are stored as strings (path separators differ on Windows), if relative paths are used (breaks when current directory changes), or if path normalization is inconsistent (e.g., `C:\Folder` vs `C:\folder` vs `C:\FOLDER` treated as different on case-insensitive Windows).
+### Pitfall 10: Benchmark Invalidation from Test Corpus Drift
+**What goes wrong:** Performance optimizations benchmarked on small test set (100 PDFs, 230 tests) show speed gains, but full corpus (30,429 PDFs) shows accuracy regression or no speed gain. Test set not representative of worst-case files.
 
 **Why it happens:**
-Windows file paths are case-insensitive but case-preserving. String comparisons are case-sensitive, so `Path("C:\\PDFs")` and `Path("C:\\pdfs")` create different dictionary keys even though they refer to the same directory. Workers may resolve paths differently based on their working directory.
+- Test corpus selected for coverage, not difficulty (clean scans over-represented)
+- Worst-quality scans under-represented in test set (long tail of problem files)
+- Small test set averages hide worst-case behavior
+- Performance improvements measured on best-case, regression hits worst-case
+- Per-folder quality variation not reflected in test corpus
 
-**How to avoid:**
-1. **Use pathlib.Path with resolved absolute paths**:
-   ```python
-   from pathlib import Path
+**Consequences:**
+- Optimizations validated on tests but fail on real corpus
+- Accuracy regressions discovered after processing thousands of real files
+- Campaign reports show new problem folders not in test set
+- User frustration from "tested and validated" changes failing in production
 
-   def normalize_path(path):
-       """Consistent path representation for Windows."""
-       return Path(path).resolve()  # Absolute + normalized
+**Prevention:**
+1. **Stratified test corpus**: Include worst-case files (low quality, multi-ID, rotated, degraded)
+2. **Per-folder sampling**: Sample from each directory to catch folder-specific issues
+3. **Benchmark on realistic scale**: Test on 1000-file subset of real corpus, not just 230-test suite
+4. **Track worst-case metrics**: Monitor P95/P99 accuracy, not just average
+5. **Staged rollout**: Process 10% of corpus with optimizations, validate accuracy before full run
 
-   # Track by normalized path
-   folder_stats = {}
-   pdf_path = normalize_path(pdf_filename)
-   folder_key = str(pdf_path.parent)  # Use string of normalized path
+**Detection:**
+- Test suite passes but full corpus accuracy drops
+- Campaign reports flag problem folders not in test set
+- Per-folder statistics show bimodal distribution (test set clean, real corpus degraded)
 
-   if folder_key not in folder_stats:
-       folder_stats[folder_key] = {'processed': 0, 'failed': 0}
-   folder_stats[folder_key]['processed'] += 1
-   ```
+**Phase assignment:** Phase 5 (Validation) — requires representative test corpus before release
 
-2. **Normalize paths at data collection boundary**:
-   ```python
-   def process_pdf(pdf_path):
-       """Worker returns normalized paths."""
-       pdf_path = Path(pdf_path).resolve()
-       result = {
-           'pdf': str(pdf_path),  # Full absolute path
-           'folder': str(pdf_path.parent),  # Normalized folder
-           'success': True,
-           # ... other fields ...
-       }
-       return result
+**Sources:**
+- [OCR Accuracy Explained: How to Improve It](https://www.llamaindex.ai/blog/ocr-accuracy)
+- [How to Use OCR Testing Images for Accuracy Validation?](https://aimonk.com/how-to-use-ocr-testing-images-accuracy-validation/)
 
-   # Main process aggregates by folder
-   for result in pool.imap_unordered(process_pdf, pdf_files):
-       folder = result['folder']
-       folder_stats[folder]['processed'] += 1
-   ```
-
-3. **Handle case-insensitive lookups on Windows**:
-   ```python
-   from collections import defaultdict
-   import sys
-
-   class CaseInsensitiveDict(dict):
-       """Dictionary with case-insensitive keys on Windows."""
-       def __init__(self):
-           super().__init__()
-           self._case_map = {}  # lowercase -> original case
-
-       def __setitem__(self, key, value):
-           key_lower = key.lower() if sys.platform == 'win32' else key
-           self._case_map[key_lower] = key
-           super().__setitem__(self._case_map[key_lower], value)
-
-       def __getitem__(self, key):
-           key_lower = key.lower() if sys.platform == 'win32' else key
-           canonical_key = self._case_map.get(key_lower, key)
-           return super().__getitem__(canonical_key)
-
-   folder_stats = CaseInsensitiveDict()
-   ```
-
-4. **Store relative paths from campaign root for portability**:
-   ```python
-   campaign_root = Path(pdf_directory).resolve()
-
-   def get_relative_folder(pdf_path, campaign_root):
-       """Get folder relative to campaign root."""
-       pdf_path = Path(pdf_path).resolve()
-       folder = pdf_path.parent
-       try:
-           rel_folder = folder.relative_to(campaign_root)
-           return str(rel_folder)
-       except ValueError:
-           # PDF outside campaign root
-           return str(folder)
-   ```
-
-**Warning signs:**
-- Same folder appears multiple times in stats with different counts
-- Stats show `C:\PDFs` and `C:\pdfs` as separate folders
-- Relative path stats break after resume from checkpoint
-- Folder counts don't sum to total file count
-
-**Phase to address:**
-Phase 3 (Statistics Tracking) — establish path normalization before collecting per-folder stats
+**Confidence:** MEDIUM (general testing best practice, not OCR-specific)
 
 ---
 
-## Technical Debt Patterns
+## Minor Pitfalls
 
-Shortcuts that seem reasonable but create long-term problems.
+Small mistakes that cause inefficiency or maintenance burden but not data loss.
 
-| Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
-|----------|-------------------|----------------|-----------------|
-| Skip `fsync()` in checkpoint writes | Slightly faster writes | Checkpoint corruption after crash/power loss | NEVER — data loss unacceptable at 30K+ file scale |
-| Use `pool.terminate()` on Ctrl+C | Immediate shutdown | Queue corruption, zombie processes, checkpoint loss | NEVER — use `close()` + `join(timeout)` + `terminate()` fallback |
-| Use Manager for shared statistics | Simpler code | 10-100x performance penalty | Only if stats updated < 100 times total |
-| Block on `input()` during processing | Standard Python pattern | Program unresponsive to Ctrl+C | Only when workers fully idle |
-| Store paths as strings | Works initially | Case-sensitivity bugs on Windows | Only for display, never for dictionary keys |
-| Use `signal.SIGUSR1` for reload | Common POSIX pattern | Crashes on Windows | NEVER on cross-platform code |
-| Skip worker signal ignoring | Works on Linux | Workers terminate prematurely on Ctrl+C (Windows) | NEVER on Windows |
-| Pass generators to `imap()` in Python 3.4 | Memory efficient | Deadlock on exception | NEVER — upgrade to 3.5+ or use lists |
+### Pitfall 11: Premature Optimization Without Profiling
+**What goes wrong:** Optimizing parts of pipeline that aren't bottlenecks (e.g., optimizing JSON writing when 95% of time is OCR). No speed gain, added complexity, maintenance burden.
 
-## Integration Gotchas
+**Why it happens:**
+- Assumptions about bottlenecks without measurement
+- "PDF rendering is slow" → optimize rendering, but OCR is actual bottleneck
+- Micro-optimizations (list comprehensions, caching) with negligible impact
+- Tesseract OCR dominates runtime (likely >90% of total time)
 
-Common mistakes when integrating components.
+**Consequences:**
+- Wasted development time on non-bottlenecks
+- Code complexity increases with no throughput gain
+- Technical debt from premature abstractions
+- Real bottlenecks remain unaddressed
 
-| Integration | Common Mistake | Correct Approach |
-|-------------|----------------|------------------|
-| **tqdm + multiprocessing** | Use `pool.map()` and update tqdm in workers | Use `pool.imap_unordered()` in main thread, update tqdm on each result |
-| **Signal handlers + Pool** | Register handler before creating pool | Create pool first, then register handlers (pool workers inherit handlers) |
-| **Checkpoints + multiprocessing** | Workers write checkpoint concurrently | Only main process writes checkpoint; workers return results |
-| **Event + Pool workers** | Pass Event as function argument | Pass Event in Pool initializer or use global + init |
-| **pathlib + Windows** | Use string concatenation `"C:\\" + folder` | Use `Path("C:\\") / folder` for cross-platform safety |
-| **Ctrl+C + input()** | Assume input() is interruptible | Use non-blocking alternatives or ensure workers idle during input |
+**Prevention:**
+1. **Profile first**: Use `cProfile` or manual timing to measure where time spent
+2. **80/20 rule**: Optimize the 20% of code that consumes 80% of runtime
+3. **Measure impact**: Benchmark before/after each optimization to validate gain
+4. **Start with Tesseract**: OCR likely dominates — optimize Tesseract config before anything else
 
-## Performance Traps
+**Detection:**
+- Optimization shows <5% speedup on benchmarks
+- Profiling reveals time spent elsewhere
+- Code reviews flag unnecessary complexity
 
-Patterns that work at small scale but fail as usage grows.
+**Phase assignment:** Phase 5 (Profiling) — should be Phase 0 (before any optimization)
 
-| Trap | Symptoms | Prevention | When It Breaks |
-|------|----------|------------|----------------|
-| **Manager for per-PDF stats** | Processing slows to crawl as PDF count grows | Use local stats + aggregation | > 1000 PDFs with stats updates |
-| **Synchronous checkpoint writes** | Each result write blocks for 10-50ms | Batch checkpoint writes (every 100 PDFs or 30s) | > 10K PDFs |
-| **Blocking `pool.map()`** | Can't interrupt, no progress visibility | Use `imap_unordered()` with tqdm | Always (lack of interactivity) |
-| **Single-threaded resume validation** | Resume startup slow on large checkpoints | Validate checkpoint schema only, not every path | > 5K PDFs in checkpoint |
-| **Print to stdout in workers** | Corrupts tqdm output, slows pool | Use `tqdm.write()` or logging to file | > 10 workers |
-| **Creating new Pool per campaign action** | 5-10s startup per action (spawn overhead on Windows) | Reuse pool across actions when possible | > 4 workers on Windows |
+**Sources:**
+- General software engineering best practice
 
-## UX Pitfalls
+**Confidence:** HIGH
 
-Common user experience mistakes in this domain.
+---
 
-| Pitfall | User Impact | Better Approach |
-|---------|-------------|-----------------|
-| **No feedback during Ctrl+C cleanup** | User thinks program frozen, force-kills | Print "Finishing current files, please wait..." immediately on SIGINT |
-| **tqdm bar corruption after Ctrl+C** | Terminal unusable without `reset` command | Always call `tqdm.close()` in finally block |
-| **Menu appears before workers fully stopped** | Selecting option while workers running causes errors | Wait for `pool.join()` completion before showing menu |
-| **No ETA for graceful shutdown** | User doesn't know if waiting seconds or hours | Show "N files remaining, ~MM:SS left" during shutdown |
-| **Statistics update only at end** | No progress indication for hours-long runs | Update stats every 100 PDFs or 30s |
-| **Checkpoint resume doesn't show what's skipped** | User unsure if resume worked | Print "Resuming: X/Y PDFs already processed" on startup |
+### Pitfall 12: Logging Overhead in Tight Loops
+**What goes wrong:** Adding verbose logging inside per-page OCR loop (e.g., logging every rotation attempt, every image conversion) causes 10-20% slowdown. I/O overhead of logging dominates in tight loops.
 
-## "Looks Done But Isn't" Checklist
+**Why it happens:**
+- Logging to file on every page processed (30K+ pages × 4 rotations = 120K+ log writes)
+- String formatting overhead (`f"Processing {file} page {page}"` computed even if log level disabled)
+- Lock contention in multiprocessing (workers serialize on shared log file)
 
-Things that appear complete but are missing critical pieces.
+**Consequences:**
+- Performance optimization negated by logging overhead
+- Log files grow to gigabytes (hard to search)
+- Worker contention on log file lock (serializes parallel work)
 
-- [ ] **Graceful Shutdown:** Works with Ctrl+C, but tested with Ctrl+Break on Windows? (SIGBREAK may behave differently)
-- [ ] **Checkpoint Atomicity:** Uses `tempfile` + `os.replace()`, but calls `fsync()` before replace? (Prevents corruption)
-- [ ] **Signal Handler:** Registered handler, but workers ignore SIGINT with `signal.SIG_IGN`? (Prevents premature termination)
-- [ ] **Pool Cleanup:** Calls `pool.close()` and `pool.join()`, but drains iterators first? (Prevents deadlock)
-- [ ] **tqdm Progress:** Shows progress bar, but closes it in finally block? (Prevents terminal corruption)
-- [ ] **Per-Folder Stats:** Tracks by folder, but normalizes paths with `Path.resolve()`? (Prevents duplicate entries on Windows)
-- [ ] **Interactive Menu:** Shows menu, but only when workers fully idle? (Prevents input() blocking Ctrl+C)
-- [ ] **Campaign Resume:** Loads checkpoint, but validates schema version? (Prevents crashes on checkpoint format changes)
-- [ ] **Statistics Aggregation:** Collects stats, but uses local counters not Manager? (Prevents performance degradation)
-- [ ] **Error Handling:** Catches exceptions, but logs to file not stdout? (Prevents tqdm corruption)
+**Prevention:**
+1. **Conditional logging**: Only log at INFO level for major milestones (file start/complete), DEBUG for details
+2. **Lazy formatting**: Use `logger.debug("msg %s", var)` not `logger.debug(f"msg {var}")` (formatting skipped if DEBUG disabled)
+3. **Batch logging**: Accumulate per-worker stats, log once per file instead of per page
+4. **Separate worker logs**: Each worker writes to own log file (no lock contention)
 
-## Recovery Strategies
+**Detection:**
+- Profiling shows significant time in logging calls
+- Removing logging improves throughput >5%
+- Log file grows faster than processed files
 
-When pitfalls occur despite prevention, how to recover.
+**Phase assignment:** All phases — design decision for instrumentation
 
-| Pitfall | Recovery Cost | Recovery Steps |
-|---------|---------------|----------------|
-| **Corrupted Checkpoint** | MEDIUM | Delete checkpoint file, re-run campaign from start (or last known good checkpoint backup) |
-| **Zombie Worker Processes** | LOW | Kill zombies: `taskkill /F /IM python.exe` (Windows) or `pkill -9 python` (POSIX) |
-| **Terminal Corruption from tqdm** | LOW | Run `reset` command (POSIX) or close/reopen terminal (Windows) |
-| **Pool Deadlock** | LOW | Force quit with Ctrl+Break (Windows) or Ctrl+\\ (POSIX), check for iterator draining |
-| **Manager Performance Bottleneck** | HIGH | Refactor to local stats + aggregation pattern (code changes required) |
-| **Signal Handler Not Responding** | MEDIUM | Refactor to use `imap_unordered()` with timeout instead of blocking `map()` |
-| **Workers Not Ignoring SIGINT** | MEDIUM | Add `initializer=init_worker` to Pool constructor with `signal.SIG_IGN` |
-| **Case-Sensitive Folder Stats** | MEDIUM | Normalize existing stats by converting keys to lowercase, merge duplicates |
+**Confidence:** MEDIUM (general performance best practice)
 
-## Pitfall-to-Phase Mapping
+---
 
-How roadmap phases should address these pitfalls.
+### Pitfall 13: Hard-Coded Paths Breaking Cross-System Testing
+**What goes wrong:** Hard-coding Tesseract path (`C:\Program Files\Tesseract-OCR\tesseract.exe`) works on dev machine but breaks on test machine or other user systems.
 
-| Pitfall | Prevention Phase | Verification |
-|---------|------------------|--------------|
-| Signal handlers main-thread only | Phase 1: Signal Handler Infrastructure | Manual test: Start pool.map(), press Ctrl+C during processing, verify responds within 1s |
-| Workers inherit SIGINT | Phase 1: Signal Handler Infrastructure | Manual test: Ctrl+C during processing, verify workers finish current file before stopping |
-| Pool cleanup order deadlock | Phase 1: Signal Handler Infrastructure | Automated test: Ctrl+C during imap_unordered, verify no zombie processes afterward |
-| Checkpoint corruption | Phase 1: Signal Handler Infrastructure | Automated test: Kill process mid-write, verify checkpoint still valid JSON |
-| imap generator deadlock | Phase 2: Interactive Campaign Menu | Automated test: Pass failing generator to imap_unordered, verify timeout detection |
-| Manager performance bottleneck | Phase 3: Statistics Tracking | Performance test: Process 1000 PDFs, verify throughput > 10 PDFs/sec/worker |
-| tqdm progress bar leaks | Phase 2: Interactive Campaign Menu | Manual test: Ctrl+C during progress, verify terminal formatting clean afterward |
-| Windows signal limitations | Phase 1: Signal Handler Infrastructure | Automated test: Run on Windows, verify no ValueError on signal registration |
-| input() blocks signals | Phase 2: Interactive Campaign Menu | Manual test: Show menu with workers running, verify Ctrl+C works |
-| Per-folder stats path issues | Phase 3: Statistics Tracking | Automated test: Process PDFs in `C:\Test` and `C:\test`, verify single folder key |
+**Why it happens:**
+- Tesseract installed in different location per system
+- Installers (Windows, Homebrew, apt) use different default paths
+- Project constraints say "Tesseract already installed" but not where
+
+**Consequences:**
+- Pipeline fails on other systems with cryptic "tesseract not found" error
+- CI/CD fails if Tesseract path differs
+- Users must edit source code to change path (poor UX)
+
+**Prevention:**
+1. **Auto-detect from PATH**: Use `pytesseract.get_tesseract_version()` to check if tesseract in PATH
+2. **Config file or CLI flag**: Let users specify `--tesseract-path` if not in PATH
+3. **Graceful error message**: If not found, print helpful message: "Tesseract not found. Install from [URL] or use --tesseract-path"
+4. **Detect on first run**: Check PATH, if not found, prompt user once and save to config file
+
+**Detection:**
+- TesseractNotFoundError on systems where Tesseract not in PATH
+- CI/CD failures on fresh containers
+
+**Phase assignment:** All phases — portability concern
+
+**Confidence:** HIGH
+
+---
+
+## Phase-Specific Warnings
+
+| Phase Topic | Likely Pitfall | Mitigation |
+|-------------|---------------|------------|
+| **Phase 1: PyMuPDF Migration** | Rendering differences break downstream OCR | Mandatory accuracy regression testing on full test corpus before proceeding |
+| **Phase 1: PyMuPDF Migration** | DPI reduction below 300 causes accuracy cliff | Hard minimum 300 DPI, validate on degraded scans |
+| **Phase 1: PyMuPDF Migration** | Checkpoint format incompatibility | Version checkpoints, test v1.1 → v1.2 migration path |
+| **Phase 2: Tesseract Optimization** | Character whitelist ignored or returns empty | Validate whitelist works, don't rely on it for critical filtering |
+| **Phase 2: Tesseract Optimization** | PSM mode change misses multi-ID pages | Preserve PSM 6, test multi-ID cases |
+| **Phase 2: Tesseract Optimization** | Unnecessary preprocessing degrades clean scans | Preserve conditional preprocessing (fallback only) |
+| **Phase 3: Rotation Optimization** | OSD auto-detect unreliable (20% failure rate) | Keep 4-rotation strategy with regex validation |
+| **Phase 3: Rotation Optimization** | Single rotation detection misses multi-ID pages | Test multi-ID cases specifically |
+| **Phase 4: Parallelism Tuning** | Hybrid CPU over-subscription degrades throughput | Benchmark worker counts, start with P-core count (8) |
+| **Phase 4: Parallelism Tuning** | Memory leaks from unclosed pools | Use context manager or explicit close(), add maxtasksperchild |
+| **Phase 4: Parallelism Tuning** | Windows spawn mode pickling failures | Module-level functions and regexes, pass paths not handles |
+| **Phase 5: Profiling/Validation** | Test corpus not representative of worst-case | Stratified sampling from real corpus, track P95/P99 metrics |
+| **Phase 5: Profiling/Validation** | Premature optimization without profiling | Profile first, optimize bottlenecks (likely Tesseract OCR) |
+| **All Phases** | Logging overhead in tight loops | Conditional logging, lazy formatting, batch stats |
+
+---
+
+## Regression Testing Strategy
+
+To avoid silent accuracy degradation during performance optimization:
+
+### Mandatory Pre-Release Validation
+
+1. **Baseline measurement**: Capture v1.1 accuracy on fixed test corpus (230 tests + 1000-file real sample)
+2. **Per-phase validation**: After each phase, re-run full test corpus and compare to baseline
+3. **Threshold**: Any accuracy drop >0.5% (94.9% → 94.4%) triggers investigation
+4. **Per-folder tracking**: Monitor per-folder statistics to catch directory-specific regressions
+5. **Worst-case metrics**: Track P95/P99 accuracy (worst-performing 5% of files), not just average
+
+### Test Corpus Design
+
+- **230 existing tests**: Already pass in v1.1, must pass in v1.2
+- **Stratified sampling**: 1000-file sample from real corpus, stratified by folder
+- **Quality tiers**: Separate clean scans (>99% OCR confidence) from degraded scans (<70% confidence)
+- **Multi-ID pages**: Dedicated test cases for pages with 2+ IDs at different rotations
+- **Edge cases**: Blank pages, corrupted PDFs, extremely large files, unusual rotations
+
+### Continuous Validation
+
+- **A/B testing**: Process same 100 files with v1.1 and v1.2, diff outputs
+- **Checkpoint compatibility**: Load v1.1 checkpoint in v1.2, verify no schema errors
+- **Memory profiling**: Process 1000 files, verify memory plateaus (no leaks)
+- **Throughput benchmarking**: Measure files/hour, compare to v1.1 baseline
+
+---
+
+## Quick Reference: Risk Matrix
+
+| Pitfall | Severity | Likelihood | Detection Difficulty | Phase |
+|---------|----------|------------|---------------------|-------|
+| PyMuPDF rendering differences | **CRITICAL** | High | High (visual inspection fails) | 1 |
+| DPI reduction below 300 | **CRITICAL** | Medium | Medium (accuracy drop) | 1 |
+| Tesseract config regressions | **CRITICAL** | High | Medium (test suite may miss) | 2 |
+| Unnecessary preprocessing | **HIGH** | Medium | Low (test suite catches) | 2-3 |
+| Rotation strategy breaking multi-ID | **HIGH** | Medium | Low (test suite catches) | 3 |
+| Checkpoint format incompatibility | **HIGH** | Medium | Low (errors on load) | 1 |
+| Hybrid CPU over-subscription | **MEDIUM** | High | Low (profiling obvious) | 4 |
+| Memory leaks from unclosed pools | **MEDIUM** | Medium | Medium (slow growth) | 1-4 |
+| Windows spawn pickling failures | **MEDIUM** | Medium | Low (errors at startup) | 1-4 |
+| Non-representative test corpus | **MEDIUM** | High | High (not caught until production) | 5 |
+| Premature optimization | **LOW** | High | Low (profiling reveals) | 5 |
+| Logging overhead | **LOW** | Medium | Medium (profiling may miss) | All |
+| Hard-coded paths | **LOW** | Low | Low (errors on other systems) | All |
+
+---
+
+## Summary
+
+**Most critical risk:** PyMuPDF rendering differences that look identical but break OCR (requires mandatory accuracy regression testing before migration).
+
+**Second critical risk:** DPI reduction below 300 DPI causing 20%+ accuracy cliff on degraded scans (hard minimum 300 DPI).
+
+**Third critical risk:** Tesseract config changes (PSM, OEM, whitelist) silently regressing accuracy (requires A/B testing on full corpus).
+
+**Platform risk:** Windows 'spawn' mode multiprocessing (pickling constraints, hybrid CPU scheduler behavior).
+
+**Validation requirement:** Track accuracy metrics per phase, compare to 94.9% baseline, reject changes that regress >0.5%.
+
+**Test corpus gap:** Existing 230 tests may not represent worst-case files — add stratified sampling from real corpus.
+
+---
 
 ## Sources
 
-### Official Documentation
-- [Python multiprocessing — Process-based parallelism](https://docs.python.org/3/library/multiprocessing.html)
-- [Python signal — Set handlers for asynchronous events](https://docs.python.org/3/library/signal.html)
+### PyMuPDF Migration
+- [How to match PyMuPdf output to pdf2image output? · pymupdf/PyMuPDF · Discussion #913](https://github.com/pymupdf/PyMuPDF/discussions/913)
+- [Features Comparison - PyMuPDF documentation](https://pymupdf.readthedocs.io/en/latest/about.html)
+- [PyMuPDF Colorspace documentation](https://pymupdf.readthedocs.io/en/latest/colorspace.html)
+- [Battle of the PDF Titans: Apache Tika, PyMuPDF, pdfplumber, pdf2image, and Textract](https://openwebtech.com/battle-of-the-pdf-titans-apache-tika-pymupdf-pdfplumber-pdf2image-and-textract/)
 
-### Signal Handling with Multiprocessing
-- [Python Keyboard Interrupt Handling with Multiprocessing – Maxence BOBIN](https://bobin.iiens.net/python-keyboard-interrupt-handling-with-multiprocessing/)
-- [Handling SIGINT in multiprocessing on Windows - Python Help - Discussions](https://discuss.python.org/t/handling-sigint-in-multiprocessing-on-windows/90064)
-- [Handling SIGTERM in python on Windows - Marc-Antoine Ruel](https://maruel.ca/post/python_windows_signal/)
-- [Python Multiprocessing graceful shutdown in the proper order | peterspython.com](https://www.peterspython.com/en/blog/python-multiprocessing-graceful-shutdown-in-the-proper-order)
-- [Python Multiprocessing and KeyboardInterrupt - Bryce Boe](https://bryceboe.com/2010/08/26/python-multiprocessing-and-keyboardinterrupt/)
-- [Python: Using KeyboardInterrupt with a Multiprocessing Pool - Amethyst Reese](https://noswap.com/blog/python-multiprocessing-keyboardinterrupt)
+### OCR Accuracy and DPI
+- [OCR Accuracy Explained: How to Improve It](https://www.llamaindex.ai/blog/ocr-accuracy)
+- [OCR Accuracy: How Accurate Is OCR Data Extraction in 2026?](https://www.ocrdataextraction.com/accuracy)
+- [Enhancing OCR Accuracy in Low-Quality Scans](https://sparkco.ai/blog/enhancing-ocr-accuracy-in-low-quality-scans)
+- [OCR Accuracy Benchmarks: The 2026 Digital Transformation Revolution](https://medium.com/@info_59976/ocr-accuracy-benchmarks-the-2026-digital-transformation-revolution-2f7095c2696f)
 
-### Pool Cleanup and Shutdown
-- [Graceful exit with Python multiprocessing | The-Fonz blog](https://the-fonz.gitlab.io/posts/python-multiprocessing/)
-- [Graceful vs. Forceful: Mastering Python's Pool Termination](https://runebook.dev/en/docs/python/library/multiprocessing/multiprocessing.pool.Pool.terminate)
-- [Shutdown the Multiprocessing Pool in Python – SuperFastPython](https://superfastpython.com/shutdown-the-multiprocessing-pool-in-python/)
-- [Python Multiprocessing Pool: How to Handle KeyboardInterrupt](https://www.pythontutorials.net/blog/keyboard-interrupts-with-python-s-multiprocessing-pool/)
+### Tesseract Configuration
+- [Tesseract misses whitelisted characters · Issue #3759](https://github.com/tesseract-ocr/tesseract/issues/3759)
+- [Limiting Characters in Tesseract OCR: Complete Guide to 2026 Best Practices](https://copyprogramming.com/howto/limit-characters-tesseract-is-looking-for)
+- [Tesseract Page Segmentation Modes (PSMs) Explained](https://pyimagesearch.com/2021/11/15/tesseract-page-segmentation-modes-psms-explained-how-to-improve-your-ocr-accuracy/)
+- [Tuning Tesseract PSM and OEM for Precise OCR Character Recognition](https://sqlpey.com/python/tesseract-psm-oem-tuning/)
+- [Poor Rotation / Layout detection · Issue #4426](https://github.com/tesseract-ocr/tesseract/issues/4426)
 
-### Checkpoint and File Corruption
-- [Safely and atomically write to a file « Python recipes « ActiveState Code](https://code.activestate.com/recipes/579097-safely-and-atomically-write-to-a-file/)
-- [PSA: Avoid Data Corruption by Syncing to the Disk - ELL Blog](https://blog.elijahlopez.ca/posts/data-corruption-atomic-writing/)
-- [Python os.replace Function - Complete Guide](https://zetcode.com/python/os-replace/)
-- [Avoiding File Conflicts in Multithreaded Python Programs | by Aman Deep | Medium](https://medium.com/@aman.deep291098/avoiding-file-conflicts-in-multithreaded-python-programs-34f2888f4521)
+### Image Preprocessing
+- [Preprocessing Images to Improve OCR & DarkShield Results - IRI](https://www.iri.com/blog/data-protection/preprocessing-images-for-ocr-darkshield/)
+- [Improve OCR accuracy using advanced preprocessing techniques](https://www.nitorinfotech.com/blog/improve-ocr-accuracy-using-advanced-preprocessing-techniques/)
+- [PreP-OCR: A Complete Pipeline for Document Image Restoration and Enhanced OCR Accuracy](https://arxiv.org/html/2505.20429v1)
 
-### Known Issues and Bugs
-- [Issue 23051: multiprocessing.pool methods imap()/imap_unordered() deadlock - Python tracker](https://bugs.python.org/issue23051)
-- [Issue 38263: [Windows] multiprocessing: DupHandle.detach() race condition - Python tracker](https://bugs.python.org/issue38263)
-- [Issue 35629: hang and/or leaked processes with multiprocessing.Pool().imap() - Python tracker](https://bugs.python.org/issue35629)
+### Multiprocessing and Windows
+- [Memory Leak in Python multiprocessing.Pool - KK's Blog](https://fromkk.com/posts/memory-leak-in-python-multiprocessing-dot-pool/)
+- [Issue 34172: multiprocessing.Pool and ThreadPool leak resources after being deleted](https://bugs.python.org/issue34172)
+- [Fix: Python multiprocessing Not Working (freeze_support, Pickle Errors, Zombie Processes)](https://fixdevs.com/blog/python-multiprocessing-not-working/)
+- [Python Multiprocessing, Revisited: Fork vs Spawn](https://medium.com/@Nexumo_/python-multiprocessing-revisited-fork-vs-spawn-5b9216fd5710)
+- [Top Strategies to Manage High Memory Usage with Python Multiprocessing](https://sqlpey.com/python/top-strategies-to-manage-high-memory-usage-with-python-multiprocessing/)
 
-### Progress Bars and tqdm
-- [Progress Bars for Python Multiprocessing Tasks - Lei Mao's Log Book](https://leimao.github.io/blog/Python-tqdm-Multiprocessing/)
-- [tqdm-multiprocess · PyPI](https://pypi.org/project/tqdm-multiprocess/)
-- [Running tqdm with Python multiprocessing | Redowan's Reflections](https://rednafi.com/python/tqdm-with-multiprocessing/)
+### Hybrid CPU Architecture
+- [What Is Performance Hybrid Architecture?](https://www.intel.com/content/www/us/en/support/articles/000091896/processors.html)
+- [Hybrid CPU Performance on Windows 10 and 11 – Alois Kraus](https://aloiskraus.wordpress.com/2024/02/08/hybrid-cpu-performance-on-windows-10-and-11/)
+- [CPU Efficiency Cores vs Performance Cores: Why Are They Different?](https://www.corsair.com/us/en/explorer/gamer/gaming-pcs/cpu-efficiency-cores-vs-performance-cores-why-are-they-different/)
 
-### Shared State and Statistics
-- [Advanced Shared State Management in Python Multiprocessing](https://hevalhazalkurt.com/blog/advanced-shared-state-management-in-python-multiprocessing/)
-- [Shared counter implementation in Python multiprocessing](https://copyprogramming.com/howto/python-multiprocessing-and-a-shared-counter)
-- [Python Multiprocessing Queue: A Comprehensive Guide - CodeRivers](https://coderivers.org/blog/python-multiprocessing-queue/)
-- [Multiprocessing Queue in Python – SuperFastPython](https://superfastpython.com/multiprocessing-queue-in-python/)
-
----
-*Pitfalls research for: Campaign Management + Multiprocessing OCR Pipeline (Windows 10)*
-*Researched: 2026-06-05*
-*Confidence: HIGH — Verified with official documentation, known bug reports, and community best practices*
+### Testing and Validation
+- [How to Use OCR Testing Images for Accuracy Validation?](https://aimonk.com/how-to-use-ocr-testing-images-accuracy-validation/)
+- [Backward Compatibility in Schema Evolution: Guide](https://www.dataexpert.io/blog/backward-compatibility-schema-evolution-guide)
+- [Batch OCR Automation: High-Volume Document Processing Lifehacks](https://mmaseis.com/batch-ocr-processing-for-documents-lifehacks/)

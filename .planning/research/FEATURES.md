@@ -1,389 +1,226 @@
-# Feature Landscape: Campaign Management for Batch OCR
+# Feature Landscape: OCR Pipeline Performance Optimization
 
-**Domain:** Interactive campaign runner for long-running batch OCR processing
-**Researched:** 2026-06-05
-**Context:** Adding campaign management to existing OCR pipeline (v1.1 milestone)
-
-**Note:** This document focuses on NEW campaign management features for v1.1. Base OCR pipeline features (recursive discovery, multi-page PDF handling, multi-rotation OCR, parallel processing, checkpoint/resume, preprocessing) are already built in v1.0.
-
----
+**Domain:** Batch OCR performance optimization for 30K+ PDF corpus
+**Researched:** 2026-06-07
+**Context:** Optimizing existing multi-rotation OCR pipeline (94.9% accuracy baseline) for throughput on 20-core hybrid CPU
 
 ## Table Stakes
 
-Features users expect. Missing = product feels incomplete.
+Features that OCR performance optimization pipelines expect. Missing = incomplete optimization effort.
 
-| Feature | Why Expected | Complexity | Notes |
-|---------|--------------|------------|-------|
-| **Continue from checkpoint** | Standard batch job UX. Users expect resume after Ctrl+C or crash without reprocessing completed files. | Low | Already have checkpoint system in place. Menu just needs to detect existing state and offer "Continue" option. **Confidence: HIGH** |
-| **Graceful Ctrl+C handling** | Industry standard for long-running CLI jobs. Canonical pattern: stop accepting → drain → save state → exit. | Medium | Requires signal handling (SIGINT/SIGTERM), finishing current files in flight, flushing checkpoint atomically. Windows uses different signal model than Linux. **Confidence: HIGH** |
-| **Completion progress tracking** | Users need to know "X of Y files processed (Z%)". Standard for any batch job. | Low | Already have tqdm progress bars. Enhancement: show files completed vs total, ETA based on processing rate. **Confidence: HIGH** |
-| **Success/failure counts** | Users expect to see how many files succeeded vs failed. Basic accountability for batch processing quality. | Low | Aggregate from checkpoint data. Display: "Completed: 28,500 \| Failures: 150 \| Remaining: 1,779". **Confidence: HIGH** |
-| **View partial results** | Users need to see progress before completion. Extract partial CSV/JSON from checkpoint without waiting for full campaign to finish. | Low | Read checkpoint state file, export what's been processed so far. Useful for spot-checking quality mid-run. **Confidence: HIGH** |
-| **Re-run failed files only** | Standard failure recovery pattern. After fixing environment issues (e.g., Tesseract path), users expect to retry only failed items, not reprocess successes. | Medium | Requires filtering checkpoint to identify failures, creating new campaign targeting only those files. Depends on checkpoint schema tracking success/failure status. **Confidence: HIGH** |
-| **Real-time processing rate** | Users expect "files/minute" or "pages/second" to estimate completion time and detect slowdowns. | Low | tqdm provides iteration rate out-of-box. Enhancement: track files/min and pages/min separately since multi-page PDFs vary. **Confidence: HIGH** |
-| **Error summary on exit** | When campaign finishes or is interrupted, show summary: "X files failed. See failures in [output file]". | Low | Print summary from checkpoint aggregation. List top failure reasons if patterns detected (e.g., "75 files: PDF corrupted, 20 files: No ID found"). **Confidence: MEDIUM** |
-
-**Source confidence:** HIGH - Based on [graceful shutdown patterns](https://zylos.ai/research/2026-02-25-graceful-shutdown-long-lived-services/), [batch job monitoring best practices](https://oneuptime.com/blog/post/2026-01-30-batch-processing-monitoring/view), [checkpoint/resume workflows](https://fast.io/resources/ai-agent-checkpointing-resume/), and [batch processing metrics](https://oneuptime.com/blog/post/2026-01-30-batch-processing-metrics/view).
-
----
+| Feature | Why Expected | Complexity | Dependency | Speedup Estimate | Notes |
+|---------|--------------|------------|------------|------------------|-------|
+| **PyMuPDF PDF rendering** | Industry standard for fast PDF-to-image conversion; 2.3x faster than pdf2jpg, 1.76x faster than XPDF. Direct replacement for pdf2image. User reports: 7-page PDF in 800ms vs 10s with pdf2image. | **Low** | Requires pdf2image removal, drop-in API change from `convert_from_path()` to `page.get_pixmap(dpi=300)` | **2-12x rendering** (based on PyMuPDF vs pdf2image benchmarks) | DPI parameter auto-saves to output image (better than matrix). PyMuPDF doesn't require Poppler external dependency. 10-20% smaller file sizes than pdf2image. **Confidence: HIGH** |
+| **Tesseract character whitelist** | Constrains search space to 0-9 for 5-digit IDs; standard optimization when character set is known. Config: `-c tessedit_char_whitelist=0123456789` | **Low** | Single config parameter in existing pytesseract call | **10-30% OCR speed** (estimated from constrained search space) | Reduces false positives (O/0, I/1, S/5 confusion already handled). Works with existing PSM 6. Combine with existing normalization logic. **Confidence: MEDIUM** |
+| **Optimal DPI tuning** | 300 DPI industry standard for OCR; higher DPI degrades performance without accuracy gain. Current implementation likely defaults to 300 DPI. | **Low** | Verify current DPI, benchmark 200/250/300 DPI for digit-only accuracy | **Variable** (0-50% if over-rendering) | For small text (<10pt), 400-600 DPI may help. For digits at typical size, 200-250 DPI acceptable. Test corpus for minimum viable DPI. **Confidence: HIGH** |
+| **Process pool worker tuning** | Standard multiprocessing optimization for CPU-bound tasks. Project uses `cpu_count()-1` already; verify this is optimal for 20-core hybrid CPU (P-cores + E-cores). | **Low** | Benchmark with different worker counts (16, 19, 20, 24) on hybrid CPU | **Variable** (5-20% if misconfigured) | Windows scheduler handles P/E-core assignment automatically in Win11+. Manual affinity setting "should generally be avoided" per MS docs. Test if `cpu_count()` (20) vs `cpu_count()-1` (19) matters. **Confidence: MEDIUM** |
+| **Worker process recycling** | Prevents memory leaks in long-running multiprocessing jobs. Use `maxtasksperchild` parameter. Project already uses process recycling per v1.0 decisions. | **Low** | Already implemented; verify parameter value is reasonable (100-500 tasks) | **N/A** (stability, not speed) | `maxtasksperchild=100` typical for OCR workloads with third-party libraries (pytesseract, OpenCV). Slight overhead from process restart, negligible for multi-page PDFs. **Confidence: HIGH** |
 
 ## Differentiators
 
-Features that set product apart. Not expected, but valued.
+Features that accelerate performance beyond standard optimizations. Not expected, but high-value.
 
-| Feature | Value Proposition | Complexity | Notes |
-|---------|-------------------|------------|-------|
-| **Per-folder quality breakdown** | Unique insight: "Folder A: 99% success, Folder B: 85% success". Helps users identify problem directories (e.g., older scans, different scanner). | Medium | Track statistics hierarchically during processing. Aggregate by directory path. Display tree-style breakdown or table sorted by error rate. **Confidence: MEDIUM** |
-| **Interactive campaign menu** | Better UX than command-line flags for resume scenarios. On detecting existing checkpoint: "1) Continue, 2) Re-run failures, 3) View stats, 4) Export partial results, 5) Start fresh". | Medium | Use InquirerPy or Rich prompts. Requires designing menu flow and validation logic. More polish than functional necessity. **Confidence: HIGH** |
-| **Smart ETA with historical data** | Better than linear projection. Track processing rate per folder, adjust ETA based on folder characteristics (e.g., older scans slower). | High | Requires tracking per-folder historical rate, building regression model. Complex for v1.1. Defer unless simple moving average sufficient. **Confidence: LOW** |
-| **Preprocessing fallback statistics** | Show how often fallback was triggered: "Primary OCR: 92% \| Fallback preprocessing: 8%". Helps users understand quality distribution and preprocessing cost. | Low | Already have fallback logic. Add counter for when fallback path executes. Display in final summary. **Confidence: HIGH** |
-| **OCR confidence scores** | Tesseract provides per-character confidence. Aggregate to page-level: "High confidence: 85% \| Medium: 10% \| Low: 5%". Flags pages needing manual review. | Medium | pytesseract.image_to_data() returns confidence scores. Aggregate by page. Threshold: >90% = high, 70-90% = medium, <70% = low. Adds processing overhead. **Confidence: MEDIUM** |
-| **Rotation heuristic reporting** | Track which rotations succeeded: "90°: 70% \| 270°: 20% \| 0°: 8% \| 180°: 2%". Insight into document orientation patterns. | Low | Multi-rotation strategy already tracks which angle succeeded. Aggregate counts across campaign. Display in summary. **Confidence: HIGH** |
-| **Anomaly detection flags** | Flag unusual patterns: "Folder X has 10x more failures than average" or "Last 100 files processing slower than first 1000". Proactive alerting. | High | Requires statistical modeling (Z-score, moving averages). Complex for v1.1. Valuable but non-critical. **Confidence: LOW** |
-| **Batch comparison reports** | Compare multiple campaign runs: "Run 1 vs Run 2: +5% accuracy after preprocessing tuning". Useful for optimization experiments. | High | Out of scope for single campaign runner. Requires campaign ID tracking, historical database. Defer to future version. **Confidence: LOW** |
-
-**Source confidence:** MEDIUM-HIGH - Based on [batch statistics implementation](https://oneuptime.com/blog/post/2026-01-30-batch-processing-statistics/view), [OCR accuracy metrics](https://www.docsumo.com/blogs/ocr/accuracy), [interactive CLI patterns with InquirerPy](https://github.com/kazhala/InquirerPy), and [Rich progress tracking](https://rich.readthedocs.io/en/stable/progress.html).
-
----
+| Feature | Value Proposition | Complexity | Dependency | Speedup Estimate | Notes |
+|---------|-------------------|------------|------------|------------------|-------|
+| **Tesseract OEM 1 (LSTM-only)** | Faster than OEM 3 (default) which tries legacy+LSTM. Modern LSTM engine handles digits well. Trade: slower initialization, but amortized over multi-page PDFs. | **Low** | Config parameter: `--oem 1` in pytesseract call. Requires `tessdata_fast` or `tessdata_best` (LSTM-only traineddata). | **10-30% OCR speed** (per-page) | LSTM better context handling for degraded scans. If using tessdata_fast/best, OEM 0/2 won't work (LSTM-only). Verify installed tessdata supports OEM 1. **Confidence: MEDIUM** |
+| **Smart rotation early termination** | Skip remaining rotations once regex match found. Project already does this (90/270/0/180 with early stop). Enhance: track rotation success stats, reorder by likelihood. | **Medium** | Extend existing multi-rotation logic; add rotation distribution tracking to campaign stats | **10-25% rotation overhead** (if IDs clustered at 90°) | If 80% of IDs are 90°, reordering to [90, 270, 0, 180] saves 2.25 passes avg vs [0, 90, 180, 270]. Stats from v1.1 show rotation distribution — use for heuristic ordering. **Confidence: MEDIUM** |
+| **Conditional DPI fallback** | Start at 200 DPI, re-render at 300 DPI only if OCR fails. Mirrors existing conditional preprocessing strategy. | **Medium** | Modify PDF rendering to accept DPI param; track DPI used in results CSV | **15-35% rendering** (if 70%+ succeed at 200 DPI) | Trade: extra rendering pass on failure (uncommon if baseline is 94.9% success). Best for clean scans where lower DPI suffices. Test on corpus: does 200 DPI maintain >90% accuracy? **Confidence: MEDIUM** |
+| **PSM 7 for single-line digits** | Treats image as single line vs PSM 6 (single column). Better for isolated 5-digit IDs. Potential accuracy+speed gain. | **Low** | Change `--psm 6` to `--psm 7` in pytesseract config; benchmark on test corpus | **5-15% OCR speed** (simpler layout assumption) | PSM 7 recommended for number plates, timestamps. Trade: may fail if ID surrounded by other text. Test on representative pages. PSM 8 (single word) too restrictive. **Confidence: MEDIUM** |
+| **Batch PyMuPDF rendering** | Pre-render all pages in PDF before OCR loop vs on-demand per-page. Enables better caching, reduces file open/close overhead. | **Medium** | Refactor to: open PDF → render all pages → close PDF → OCR loop over cached images | **5-15% rendering** (amortized open/close, better caching) | PyMuPDF internal cache benefits from batch access. Memory trade: N pages * ~1-2MB per 300 DPI image. For 10-page PDF: 10-20MB temp storage. Use temp directory cleanup. **Confidence: MEDIUM** |
+| **Disable Tesseract dictionaries** | Set `load_system_dawg=false`, `load_freq_dawg=false` for non-dictionary content (5-digit IDs). Reduces search overhead. | **Low** | Add config params: `-c load_system_dawg=false -c load_freq_dawg=false` | **5-10% OCR speed** (for numeric-only content) | Dictionaries hurt accuracy on receipts, IDs, non-standard text. May slightly reduce accuracy on text near IDs (e.g., "Precede" label). Test impact on existing 94.9% baseline. **Confidence: LOW** |
+| **Grayscale-only preprocessing** | Skip conditional OpenCV fallback; always grayscale before OCR. Simplifies pipeline, reduces color data. | **Low** | Modify preprocessing: always grayscale, skip conditional threshold/denoise unless OCR fails | **3-8% preprocessing** (if currently processing color images) | Trade: may reduce accuracy on color-dependent scans (rare for scanned docs). Grayscale "reduces computational requirements" per research. Test on corpus. **Confidence: MEDIUM** |
 
 ## Anti-Features
 
-Features to explicitly NOT build.
+Features to explicitly NOT build. Common performance traps to avoid.
 
-| Anti-Feature | Why Avoid | What to Do Instead |
-|--------------|-----------|-------------------|
-| **Real-time dashboard web UI** | Out of scope per PROJECT.md. Adds web server, frontend complexity. CLI-only requirement. | Stick to terminal UI with Rich. Users can export partial results and analyze in Excel/Pandas if needed. **Confidence: HIGH** |
-| **Automatic failure retry logic** | Dangerous without root cause understanding. Re-running corrupted PDFs wastes time. User should investigate failures first. | Provide "Re-run failures" menu option that requires explicit user choice. Show failure reasons so user can fix environment before retry. **Confidence: HIGH** |
-| **Database-backed checkpoint** | PROJECT.md specifies no database. JSON checkpoint files sufficient. DB adds dependency, deployment complexity. | Continue with atomic JSON checkpoint writes. Portable, human-readable, crash-safe with tempfile+os.replace pattern. **Confidence: HIGH** |
-| **Parallel campaign execution** | Confusing UX. Users don't need to run multiple campaigns simultaneously. Single campaign with parallelization within is sufficient. | One active campaign at a time. Users can run multiple terminal sessions manually if needed, but don't build orchestration for it. **Confidence: HIGH** |
-| **Interactive page-by-page review** | Not "no manual intervention" per constraints. Campaign runs fully automated. Manual review happens after completion using exported CSV/JSON. | Provide high-quality reports (confidence scores, failure summaries) so users know what to review manually post-processing. **Confidence: HIGH** |
-| **Cloud storage integration** | Local-only tool per constraints. No AWS S3, Azure Blob, etc. Adds network dependencies, auth complexity. | Users can manually upload CSV/JSON outputs if they want cloud storage. Keep tool file-system only. **Confidence: HIGH** |
-| **Email/Slack notifications** | Over-engineering for local CLI tool. Users will monitor terminal or check later. Notifications require configuration, auth, network. | Print clear terminal summaries. Users can wrap script with their own notification logic if desired (e.g., `python precede_ocr.py && curl slack-webhook`). **Confidence: MEDIUM** |
-| **Adaptive parallelization** | Complexity not worth benefit. Dynamic worker scaling based on CPU/memory adds overhead, unpredictable behavior. | Stick with static worker count (--workers N). Let users tune based on their system. Simple, predictable, sufficient. **Confidence: HIGH** |
-
-**Source confidence:** HIGH - Based on project requirements (CLI-only, local, no manual intervention, no database per PROJECT.md) and [batch processing anti-patterns](https://www.linkedin.com/advice/0/what-common-challenges-pitfalls-batch-processing).
-
----
+| Anti-Feature | Why Avoid | What to Do Instead | Complexity |
+|--------------|-----------|-------------------|------------|
+| **Manual CPU affinity for P/E-cores** | Windows 11+ scheduler handles hybrid CPU automatically. Manual affinity "should generally be avoided" per MS docs; can decrease performance by interfering with scheduler. | Trust OS scheduler. Benchmark with `cpu_count()` vs `cpu_count()-1` workers to verify saturation. | N/A |
+| **Tesseract OSD (Orientation+Script Detection)** | PSM 0/1 for auto-rotation unreliable ("Poor Rotation / Layout detection" GitHub #4426). Project correctly uses multi-rotation brute-force with regex validation. | Keep existing 4-rotation strategy (90/270/0/180). Enhance with smart reordering based on corpus stats. | N/A |
+| **DPI >300 for digit OCR** | Diminishing returns; may degrade accuracy by oversizing fonts. "Beyond 300 DPI does typically not improve results further." | Stick to 200-300 DPI range. Benchmark lower DPI (200/250) for speed gains without accuracy loss. | N/A |
+| **Preprocessing all pages upfront** | Conditional preprocessing (v1.0) targets only failed OCR. Preprocessing everything wastes CPU on clean scans (majority of corpus at 94.9% baseline). | Keep conditional fallback. Only preprocess (threshold, denoise) after initial OCR fails. | N/A |
+| **GPU-accelerated OCR (EasyOCR, PaddleOCR)** | Tesseract CPU-first design already fast for digits (<1s/page). GPU adds dependency, complexity, cost. EasyOCR slower on CPU. | Optimize Tesseract config (whitelist, PSM, OEM). Project constraint: local processing, no cloud. | N/A |
+| **Page-level multiprocessing** | Overhead of IPC per page. Project correctly uses PDF-level parallelism (each worker handles full PDF). Finer-grained parallelism degrades performance on Windows (spawn cost). | Keep coarse-grained parallelism: one PDF per worker. Pool.map(process_pdf, pdf_paths). | N/A |
+| **Caching OCR results across runs** | Single-shot batch job (out of scope per PROJECT.md). Checkpoint/resume handles interruption. Cross-run caching adds complexity for marginal benefit (re-running rare). | Use existing checkpoint/resume for crash recovery. No need for persistent cache beyond campaign_state.json. | N/A |
+| **Resize/downscale before OCR** | Counterproductive. OCR needs 200-300 DPI minimum. Downscaling from 300 DPI degrades accuracy. Only upscale if source <200 DPI. | Render at target DPI directly (200-300). Avoid post-rendering resize. PyMuPDF `get_pixmap(dpi=N)` handles this. | N/A |
+| **EXIF orientation detection** | PDFs don't have EXIF data (camera metadata). Only relevant for JPEG/photo inputs. Project processes scanned PDFs (rasterized pages). | Not applicable. Continue multi-rotation strategy for scanned document orientation. | N/A |
 
 ## Feature Dependencies
 
 ```
-Interactive campaign menu → Checkpoint detection (ALREADY EXISTS)
-Re-run failures → Checkpoint failure tracking (ALREADY EXISTS: notes field)
-Per-folder statistics → Checkpoint schema enhancement (ADD: folder_path tracking)
-Graceful Ctrl+C → Signal handling + atomic checkpoint save (ALREADY ATOMIC)
-Export partial results → Checkpoint read + CSV/JSON generation (REUSE: existing export logic)
-OCR confidence scores → pytesseract.image_to_data() instead of image_to_string() (CHANGE: OCR call)
-Preprocessing fallback stats → Counter in preprocessing path (ADD: simple counter)
-Rotation heuristic reporting → Track successful rotation angle (ALREADY TRACKED: rotation_detected field)
+PyMuPDF rendering
+  ↓
+Optimal DPI tuning (200-300 DPI parameter)
+  ↓
+Batch rendering (optional: render all pages before OCR)
+  ↓
+Tesseract config optimization (whitelist, PSM 7, OEM 1, disable dictionaries)
+  ↓
+Smart rotation early termination (track stats, reorder rotations)
+  ↓
+Conditional DPI fallback (optional: re-render at higher DPI on failure)
 ```
 
-**Key insight:** Most campaign features leverage existing checkpoint infrastructure. Minimal new dependencies. Clean incremental enhancement.
-
----
+**Independent optimizations:**
+- Process pool worker tuning (parallel to above)
+- Grayscale-only preprocessing (replaces conditional preprocessing)
 
 ## MVP Recommendation
 
-### Priority 1: Core Campaign UX (Table Stakes)
+### Phase 1: Drop-in Performance Gains (Low-Hanging Fruit)
+**Prioritize:**
+1. **PyMuPDF PDF rendering** — 2-12x rendering speedup, drop-in replacement
+2. **Tesseract character whitelist** — 10-30% OCR speedup, single config line
+3. **Optimal DPI benchmarking** — Verify 300 DPI is optimal; test 200/250 DPI for speed
+4. **Process pool worker count tuning** — Benchmark 16-20 workers on 20-core CPU
 
-1. **Graceful Ctrl+C handling** — Register signal handler, finish in-flight files, save checkpoint, exit cleanly
-2. **Interactive campaign menu** — Detect checkpoint, offer: Continue | Re-run failures | View stats | Export partial | Start fresh
-3. **Completion progress tracking** — Enhanced tqdm/Rich: "Completed: X/Y (Z%) | Rate: A files/min | ETA: B"
-4. **Success/failure summary** — On exit: "Completed: X | Failures: Y | Success rate: Z%"
+**Expected combined speedup:** 2-15x (dominated by PyMuPDF rendering improvement)
 
-### Priority 2: Quality Insights (Differentiators)
+**Complexity:** Low — all config-level changes, no algorithm rewrites
 
-5. **Per-folder statistics** — Track and display error rate by directory: helps identify problem areas
-6. **Preprocessing fallback statistics** — Show how often fallback triggered: "Primary: 92% | Fallback: 8%"
-7. **Rotation heuristic reporting** — Aggregate rotation angles: "90°: 70% | 270°: 20% | 0°: 8% | 180°: 2%"
+**Risk:** Very low — PyMuPDF API well-documented, Tesseract configs safe
 
-### Priority 3: Advanced Quality (Defer if Time-Constrained)
+### Phase 2: Advanced Config Tuning
+**Defer to Phase 2:**
+5. **Tesseract OEM 1 (LSTM-only)** — 10-30% OCR speedup, verify tessdata compatibility
+6. **PSM 7 (single-line mode)** — 5-15% OCR speedup, test on corpus for accuracy impact
+7. **Disable Tesseract dictionaries** — 5-10% OCR speedup, low-confidence (needs testing)
+8. **Grayscale-only preprocessing** — 3-8% preprocessing speedup, test accuracy impact
 
-8. **OCR confidence scores** — Page-level confidence aggregation from Tesseract. Useful but adds overhead.
-9. **Smart ETA with historical data** — Complexity not justified for v1.1. Linear ETA sufficient.
-10. **Anomaly detection flags** — Valuable but complex. Defer to future version.
+**Expected incremental speedup:** 1.5-2x on top of Phase 1
 
-### Defer to Future Versions
+**Complexity:** Medium — requires corpus benchmarking, accuracy validation
 
-- **Batch comparison reports** — Requires historical database, out of scope
-- **Adaptive parallelization** — Over-engineering, static workers sufficient
-- **All anti-features** — Explicitly avoid per rationale above
+**Risk:** Medium — config changes may affect accuracy (need A/B testing)
 
-**Rationale:** Focus on table stakes that make long-running campaigns manageable (graceful stop, resume menu, progress visibility). Add quality insights (per-folder stats, fallback tracking) to help users understand results. Defer complex features requiring statistical modeling or historical tracking.
+### Phase 3: Algorithmic Enhancements (If Needed)
+**Defer to Phase 3 (only if Phase 1+2 insufficient):**
+9. **Smart rotation reordering** — 10-25% rotation overhead reduction, uses existing stats
+10. **Conditional DPI fallback** — 15-35% rendering speedup, mirrors existing preprocessing pattern
+11. **Batch PyMuPDF rendering** — 5-15% rendering speedup, memory trade-off
 
----
+**Expected incremental speedup:** 1.2-1.5x on top of Phase 1+2
 
-## Implementation Notes
+**Complexity:** High — algorithmic changes, state management, memory profiling
 
-### Existing Checkpoint Schema (Assumed)
+**Risk:** Medium-high — increased code complexity, memory usage, new failure modes
 
-```json
-{
-  "version": "1.0",
-  "started_at": "2026-06-05T10:30:00",
-  "last_updated": "2026-06-05T12:45:00",
-  "completed": ["file1.pdf", "file2.pdf"],
-  "failed": {
-    "file3.pdf": "Corrupted PDF",
-    "file4.pdf": "No ID found"
-  },
-  "results": {
-    "file1.pdf": {"page_1": ["12345"], "page_2": ["67890"]},
-    "file2.pdf": {"page_1": ["11111"]}
-  }
-}
-```
+### Rationale for Ordering
 
-### Enhancements Needed for Campaign Features
+**Phase 1 prioritized** because:
+- Lowest implementation risk (config changes, API swaps)
+- Highest individual speedup factors (PyMuPDF rendering dominates)
+- No accuracy risk (PyMuPDF = visual fidelity, whitelist = subset constraint)
+- Fast to validate (benchmark, commit, move on)
 
-**Add to checkpoint:**
-- `folder_statistics`: Map of folder paths to {total, succeeded, failed, fallback_count, rotation_distribution}
-- `global_statistics`: {total_files, total_pages, total_ids, fallback_triggered_count}
-- `processing_rate_history`: List of {timestamp, files_completed, rate} for ETA calculation
+**Phase 2 deferred** because:
+- Requires corpus-wide accuracy validation (time-intensive)
+- Speedup gains smaller than Phase 1 (10-30% vs 2-12x)
+- Config interactions need testing (OEM+PSM+whitelist combinations)
 
-**No schema break:** Add fields, keep backward compatibility. Old checkpoints work, just lack new statistics.
+**Phase 3 deferred** because:
+- Highest complexity-to-speedup ratio
+- Requires new infrastructure (stats tracking, fallback logic, memory management)
+- Premature optimization if Phase 1+2 achieve target throughput
 
-### Libraries for Interactive Menu
+### Stop Conditions
 
-| Library | Pros | Cons | Recommendation |
-|---------|------|------|----------------|
-| **InquirerPy** | Most feature-rich. Fuzzy search, validation, customization. Modern prompt_toolkit 3.0+ based. | Heavier dependency. | **RECOMMENDED** for best UX |
-| **questionary** | Simpler than InquirerPy. Well-established, stable. prompt_toolkit based. | Less customization than InquirerPy. | Fallback if InquirerPy issues |
-| **Rich prompts** | Already using Rich for progress bars. Integrated styling. | Less mature prompt features than InquirerPy. | Use for simple yes/no, not full menu |
-| **python-inquirer** | Uses blessed instead of prompt_toolkit. | Different ecosystem, less cross-platform testing. | **AVOID** - prompt_toolkit better |
+**Do NOT proceed to Phase 2/3 if:**
+- Phase 1 achieves acceptable total runtime for 30K+ corpus (e.g., <24 hours end-to-end)
+- Further optimization ROI doesn't justify increased code complexity
+- Accuracy drops below 94% baseline (current: 94.9%)
 
-**Verdict:** InquirerPy for interactive menu. Already planning to use Rich for progress/statistics display. Complementary libraries.
+**Benchmark after each phase:**
+- Total runtime on representative subset (e.g., 1000 PDFs)
+- Per-page OCR latency (avg, p50, p95, p99)
+- Accuracy on test corpus (maintain ≥94%)
+- Memory usage (peak RSS, avg per worker)
 
-**Source:** [InquirerPy GitHub](https://github.com/kazhala/InquirerPy), [InquirerPy vs questionary comparison](https://inquirerpy.readthedocs.io/), [Rich interactive CLI](https://arjancodes.com/blog/rich-python-library-for-interactive-cli-tools/).
+## Performance Profiling Recommendations
 
-### Statistics Display with Rich
+### Instrumentation Points (for identifying actual bottlenecks)
+1. **PDF rendering time** (per page)
+2. **OCR time** (per rotation attempt, per page)
+3. **Preprocessing time** (when triggered)
+4. **Regex extraction time** (negligible, but measure)
+5. **Rotation attempts per page** (for smart reordering heuristic)
+6. **Worker utilization** (idle time, queue depth)
 
-Use **Rich Tables** and **Rich Layout** for campaign summary:
+### Profiling Tools
+- **cProfile** for function-level hotspots
+- **memory_profiler** for memory leak detection
+- **py-spy** for sampling profiler (low overhead)
+- **psutil** for per-worker CPU/memory tracking
 
-```python
-from rich.console import Console
-from rich.table import Table
-from rich.layout import Layout
-
-console = Console()
-
-# Overall statistics table
-stats_table = Table(title="Campaign Statistics")
-stats_table.add_column("Metric", style="cyan")
-stats_table.add_column("Value", style="magenta")
-stats_table.add_row("Total Files", "30,429")
-stats_table.add_row("Completed", "28,500 (93.7%)")
-stats_table.add_row("Failed", "150 (0.5%)")
-stats_table.add_row("Remaining", "1,779 (5.8%)")
-stats_table.add_row("Processing Rate", "45 files/min")
-
-# Per-folder breakdown table
-folder_table = Table(title="Per-Folder Quality")
-folder_table.add_column("Folder", style="cyan")
-folder_table.add_column("Total", justify="right")
-folder_table.add_column("Success Rate", justify="right", style="green")
-folder_table.add_column("Failures", justify="right", style="red")
-folder_table.add_row("scans/2020", "5000", "99.2%", "40")
-folder_table.add_row("scans/2019", "4500", "85.3%", "661")
-
-console.print(stats_table)
-console.print(folder_table)
-```
-
-**Source:** [Rich Progress Display](https://rich.readthedocs.io/en/stable/progress.html), [Rich Tables documentation](https://github.com/Textualize/rich), [Multi-threading Progress with Rich](https://liumaoli.me/notes/notes-about-rich/).
-
-### Graceful Shutdown Pattern (Windows)
-
-Python signal handling on Windows is limited but functional:
-
-```python
-import signal
-import sys
-from multiprocessing import Pool, Event
-
-shutdown_event = Event()
-
-def signal_handler(signum, frame):
-    """Handle Ctrl+C gracefully"""
-    print("\n⚠️  Shutdown requested. Finishing current files...")
-    shutdown_event.set()
-    # Don't call sys.exit() — let main loop finish naturally
-
-def process_with_shutdown_check(pdf_path):
-    """Worker function that checks shutdown event"""
-    if shutdown_event.is_set():
-        return None  # Skip processing if shutdown requested
-    return process_pdf(pdf_path)  # Existing function
-
-def main():
-    signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
-    signal.signal(signal.SIGTERM, signal_handler)  # Kill command
-
-    # Process with periodic shutdown checks
-    # ... existing multiprocessing logic ...
-
-    # After loop, save checkpoint and exit gracefully
-    if shutdown_event.is_set():
-        save_checkpoint_atomically(state)
-        print("✓ Checkpoint saved. Run again to resume.")
-        sys.exit(0)
-```
-
-**Windows caveats:**
-- SIGTERM not sent by Ctrl+C (only SIGINT)
-- Process pool workers ignore signals (only main process receives)
-- Use `shutdown_event` (multiprocessing.Event) to communicate to workers
-- Workers check event periodically (e.g., before each PDF)
-
-**Source:** [Graceful Shutdown Patterns](https://zylos.ai/research/2026-02-25-graceful-shutdown-long-lived-services/), [River graceful shutdown docs](https://riverqueue.com/docs/graceful-shutdown), [Graceful shutdown in Go patterns (applicable concepts)](https://dev.to/young_gao/graceful-shutdown-in-go-patterns-every-production-service-needs-3l9c).
-
-### Progress Tracking with Rich
-
-Existing code likely uses `tqdm` for basic progress. Campaign runner enhancements:
-
-**Rich Progress (recommended for campaign dashboard)**
-
-```python
-from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
-
-with Progress(
-    SpinnerColumn(),
-    TextColumn("[progress.description]{task.description}"),
-    BarColumn(),
-    TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-    TextColumn("({task.completed}/{task.total})"),
-    TextColumn("•"),
-    TextColumn("[cyan]{task.fields[rate]:.1f} files/min"),
-    TimeRemainingColumn(),
-    TimeElapsedColumn(),
-) as progress:
-    task = progress.add_task(
-        "[green]Processing PDFs...",
-        total=total_files,
-        rate=0.0  # Custom field
-    )
-
-    for pdf in pdf_list:
-        result = process_pdf(pdf)
-        progress.update(task, advance=1, rate=calculate_rate())
-```
-
-**Recommendation:** Switch to Rich Progress for campaign runner. Better integration with Rich tables/layout for statistics display. More modern styling. tqdm sufficient for simple scripts, but campaign runner benefits from richer UI.
-
-**Source:** [Rich Progress documentation](https://rich.readthedocs.io/en/stable/progress.html), [Richer progress bars tutorial](https://timothygebhard.de/posts/richer-progress-bars-for-rich/), [Progress bars with Rich](https://www.willmcgugan.com/blog/tech/post/progress-bars-with-rich/).
-
----
-
-## Complexity Assessment by Feature
-
-| Feature | Complexity | Estimated Effort | Rationale |
-|---------|------------|------------------|-----------|
-| Interactive campaign menu | Medium | 4-6 hours | InquirerPy integration, menu logic, state detection |
-| Graceful Ctrl+C | Medium | 3-5 hours | Signal handling, shutdown coordination, testing edge cases |
-| Per-folder statistics | Medium | 4-6 hours | Checkpoint schema enhancement, aggregation logic, display |
-| Completion progress (enhanced) | Low | 2-3 hours | Rich Progress integration, rate calculation |
-| Success/failure summary | Low | 1-2 hours | Aggregate from checkpoint, format display |
-| Export partial results | Low | 2-3 hours | Read checkpoint, reuse existing CSV/JSON export |
-| Re-run failures | Medium | 3-4 hours | Filter checkpoint, create failure-only file list |
-| Preprocessing fallback stats | Low | 1-2 hours | Add counter, display in summary |
-| Rotation heuristic reporting | Low | 1-2 hours | Aggregate rotation_detected field, display distribution |
-| OCR confidence scores | Medium | 5-8 hours | Change OCR call, aggregate scores, threshold logic, testing |
-
-**Total estimated effort for Priority 1+2 (MVP):** ~20-30 hours
-
-**Source confidence:** MEDIUM - Based on implementation patterns from [batch processing best practices](https://oneuptime.com/blog/post/2026-01-30-batch-processing-metrics/view), [Python multiprocessing challenges](https://www.linkedin.com/advice/0/what-common-challenges-pitfalls-batch-processing), and experience estimates from similar CLI tools.
-
----
-
-## Quality Metrics for Campaign Management
-
-**Success rate threshold:** 99% or higher for production batch jobs. 95%+ acceptable for initial validation runs.
-
-**Throughput targets:** Based on hardware:
-- 4 cores: 15-25 files/min (0.25-0.4 files/sec)
-- 8 cores: 30-50 files/min (0.5-0.8 files/sec)
-- 16 cores: 60-100 files/min (1.0-1.7 files/sec)
-
-**Time-to-completion for 30K corpus:**
-- Serial: 30-50 hours (unacceptable)
-- 4 cores: 20-35 hours
-- 8 cores: 10-17 hours
-- 16 cores: 5-8 hours (target)
-
-**Error handling SLA:** Isolated failures should not crash batch. <0.6% error rate (6 per mille) is industry standard for batch jobs.
-
-**Confidence score thresholds (if implemented):**
-- High: >90% confidence — likely accurate
-- Medium: 70-90% confidence — review recommended
-- Low: <70% confidence — manual verification required
-
-**Source:** [Batch processing metrics](https://oneuptime.com/blog/post/2026-01-30-batch-processing-metrics/view), [OCR accuracy benchmarks](https://medium.com/@sanjeeva.bora/the-definitive-guide-to-ocr-accuracy-benchmarks-and-best-practices-for-2025-8116609655da), [Task completion metrics](https://fastercapital.com/content/Task-Completion--Completion-Metrics--Measuring-Success-with-Completion-Metrics.html).
-
----
-
-## Research Confidence Assessment
-
-| Feature Category | Confidence | Notes |
-|------------------|------------|-------|
-| **Table stakes** | HIGH | Well-established patterns in batch processing systems; multiple sources confirm |
-| **Differentiators** | MEDIUM-HIGH | Per-folder stats and rotation reporting straightforward; OCR confidence and anomaly detection more complex |
-| **Anti-features** | HIGH | Based on explicit project requirements (CLI-only, local, no database, no manual intervention) |
-| **Complexity estimates** | MEDIUM | Dependent on actual implementation and edge cases; estimates from similar CLI tools |
-| **Library choices** | HIGH | InquirerPy and Rich are well-documented, actively maintained (2026) |
-| **Graceful shutdown on Windows** | MEDIUM | Python signal handling on Windows is functional but limited; requires testing |
-
----
+### Key Metrics to Track
+| Metric | Target | Rationale |
+|--------|--------|-----------|
+| **Pages/second/worker** | 5-10 pps | Tesseract <1s/page at 300 DPI + rendering overhead |
+| **Worker CPU utilization** | >85% | Low util = I/O bottleneck or queue starvation |
+| **Memory per worker** | <500MB | PyMuPDF + PIL + OpenCV overhead |
+| **Rendering vs OCR ratio** | 1:3 to 1:5 | OCR should dominate (4 rotation attempts) |
 
 ## Sources
 
-### Campaign Management and Batch Processing
-- [Campaign management for batch processes - Google Patents](https://patents.google.com/patent/GB2364399A/en)
-- [Batch Execution - Campaign Manager Guide (GE Digital)](https://www.ge.com/digital/documentation/batch/Campaign_Manager.pdf)
-- [How to Create Batch Statistics (OneUpTime Blog)](https://oneuptime.com/blog/post/2026-01-30-batch-processing-statistics/view)
-- [How to Implement Batch Reporting (OneUpTime Blog)](https://oneuptime.com/blog/post/2026-01-30-batch-processing-reporting/view)
+### Performance Benchmarks & Comparisons
+- [PyMuPDF Appendix 4: Performance Comparison Methodology](https://pymupdf.readthedocs.io/en/latest/app4.html)
+- [PyMuPDF Multiprocessing Documentation](https://pymupdf.readthedocs.io/en/latest/recipes-multiprocessing.html)
+- [PyMuPDF vs pdfplumber in 2026](https://pdfmux.com/blog/pymupdf-vs-pdfplumber/)
+- [Battle of the PDF Titans: PyMuPDF, pdfplumber, pdf2image, and Textract](https://openwebtech.com/battle-of-the-pdf-titans-apache-tika-pymupdf-pdfplumber-pdf2image-and-textract/)
+- [PaddleOCR vs Tesseract vs EasyOCR: OCR Speed and Accuracy 2026](https://www.codesota.com/ocr/paddleocr-vs-tesseract)
 
-### Graceful Shutdown Patterns
-- [Long-Running Tasks in ASP.NET Core: 2026 Best Practices](https://boldsign.com/blogs/long-running-tasks-asp-net-core-best-practices/)
-- [How to Use Graceful Shutdown Handlers for Long-Running Kubernetes Processes (OneUpTime)](https://oneuptime.com/blog/post/2026-02-09-graceful-shutdown-handlers/view)
-- [Graceful Shutdown Patterns for Long-Lived Services (Zylos Research)](https://zylos.ai/research/2026-02-25-graceful-shutdown-long-lived-services/)
-- [Graceful Shutdown in Go: Patterns Every Production Service Needs (DEV Community)](https://dev.to/young_gao/graceful-shutdown-in-go-patterns-every-production-service-needs-3l9c)
-- [Graceful shutdown (River Docs)](https://riverqueue.com/docs/graceful-shutdown)
+### Tesseract Configuration & Optimization
+- [Tuning Tesseract PSM and OEM for Precise OCR Character Recognition](https://sqlpey.com/python/tesseract-psm-oem-tuning/)
+- [Tesseract: Improving the quality of the output](https://tesseract-ocr.github.io/tessdoc/ImproveQuality.html)
+- [Improve Accuracy by tuning PSM values of Tesseract – Part 1](https://www.cloudthat.com/resources/blog/improve-accuracy-by-tuning-psm-values-of-tesseract-part-1)
+- [Improve Accuracy by tuning PSM values of Tesseract – Part 2](https://www.cloudthat.com/resources/blog/improve-accuracy-by-tuning-psm-values-of-tesseract-part-2)
+- [All Tesseract OCR options – Muthukrishnan](https://muthu.co/all-tesseract-ocr-options/)
+- [Whitelisting and Blacklisting Characters with Tesseract and Python](https://pyimagesearch.com/2021/09/06/whitelisting-and-blacklisting-characters-with-tesseract-and-python/)
+- [Tesseract Traineddata Files for Version 4.00+](https://tesseract-ocr.github.io/tessdoc/Data-Files.html)
 
-### Batch Monitoring and Statistics
-- [How to Create Batch Monitoring (OneUpTime Blog)](https://oneuptime.com/blog/post/2026-01-30-batch-processing-monitoring/view)
-- [Best Batch Document Processing Software in 2026 (CompareOCRTools)](https://www.compareocrtools.com/best-batch-document-processing-software)
-- [How to Monitor AWS Batch Jobs with CloudWatch (OneUpTime)](https://oneuptime.com/blog/post/2026-02-12-monitor-aws-batch-jobs-with-cloudwatch/view)
-- [Batch job statistics (IBM Documentation)](https://www.ibm.com/docs/en/imdm/11.6.0?topic=overview-batch-job-statistics)
+### DPI & Image Quality Best Practices
+- [Best Practices - OCR @ Pitt](https://pitt.libguides.com/ocr/bestpractices)
+- [Image Quality and Resolution for OCR results](https://knowledge.broadcom.com/external/article/254861/image-quality-and-resolution-for-ocr-res.html)
+- [Planning and Executing a Successful OCR project - Penn State](https://guides.libraries.psu.edu/c.php?g=1202269&p=8791865)
+- [OCR best practices - Document Engine - Nutrient](https://www.nutrient.io/guides/document-engine/ocr/best-practices/)
+- [PyMuPDF Pixmap and Image Processing](https://pymupdf.readthedocs.io/en/latest/pixmap.html)
+- [PyMuPDF Images Documentation](https://pymupdf.readthedocs.io/en/latest/recipes-images.html)
 
-### Interactive CLI Libraries
-- [InquirerPy (GitHub)](https://github.com/kazhala/InquirerPy)
-- [InquirerPy Documentation](https://inquirerpy.readthedocs.io/)
-- [inquirerpy · PyPI](https://pypi.org/project/inquirerpy/)
-- [The Green Report | Interactive CLI Automation with Python](https://www.thegreenreport.blog/articles/interactive-cli-automation-with-python/interactive-cli-automation-with-python.html)
-- [Rich Python Library for Advanced CLI Design (ArjanCodes)](https://arjancodes.com/blog/rich-python-library-for-interactive-cli-tools/)
+### Rotation Detection & Alternatives
+- [The Best Tesseract OCR Alternatives in 2026 - Klippa](https://www.klippa.com/en/blog/information/the-best-alternative-to-tesseract/)
+- [PaddleOCR vs Tesseract: Which is the best open source OCR?](https://www.koncile.ai/en/ressources/paddleocr-analyse-avantages-alternatives-open-source)
+- [Seeing Straight: Document Orientation Detection for Efficient OCR](https://arxiv.org/abs/2511.04161)
+- [Correcting Text Orientation with Tesseract and Python](https://pyimagesearch.com/2022/01/31/correcting-text-orientation-with-tesseract-and-python/)
 
-### Progress Tracking and Display
-- [Progress Display — Rich Documentation](https://rich.readthedocs.io/en/stable/progress.html)
-- [Multi-threading and Multi-processing Progress Visualization with Python's rich Library](https://liumaoli.me/notes/notes-about-rich/)
-- [tqdm GitHub Repository](https://github.com/tqdm/tqdm)
-- [Progress Bars in Python: A Complete Guide with Examples (DataCamp)](https://www.datacamp.com/tutorial/progress-bars-in-python)
-- [alive-progress · PyPI](https://pypi.org/project/alive-progress/)
+### Python Multiprocessing & Memory Management
+- [Multiprocessing in Python: A Guide to Using Multiple CPU Cores](https://medium.com/@aruns89/multiprocessing-in-python-a-guide-to-using-multiple-cpu-cores-f2b3c1bcc83a)
+- [Python multiprocessing documentation](https://docs.python.org/3/library/multiprocessing.html)
+- [Memory Leak in Python multiprocessing.Pool](https://fromkk.com/posts/memory-leak-in-python-multiprocessing-dot-pool/)
+- [Python multiprocessing.pool Memory Usage Growing: Causes and Solutions](https://www.pythontutorials.net/blog/memory-usage-keep-growing-with-python-s-multiprocessing-pool/)
 
-### Checkpoint and Resume Patterns
-- [AI Agent Checkpointing: Save State and Resume Guide (Fastio)](https://fast.io/resources/ai-agent-checkpointing-resume/)
-- [Checkpointing and Resuming Workflows (Microsoft Learn)](https://learn.microsoft.com/en-us/agent-framework/tutorials/workflows/checkpointing-and-resuming)
-- [Resume a run (Weights & Biases Documentation)](https://docs.wandb.ai/models/runs/resuming)
-- [Partial Batch Export (Tungsten Automation)](https://docshield.tungstenautomation.com/kc/en_us/11.1.0-40hy9nfk91/help/main/KC_administration/batchclasses/c_partialbatchexport.html)
-- [BatchOps GitHub Agentic Workflows](https://github.github.com/gh-aw/patterns/batch-ops/)
+### Windows Hybrid CPU & Affinity
+- [How to Permanently Set CPU Affinity in Windows 11 & 10](https://windowsforum.com/threads/how-to-permanently-set-cpu-affinity-in-windows-11-10-for-optimal-performance.369250/)
+- [CPU affinity in Windows: controls cores and priority](https://www.pchardwarepro.com/en/How-to-manage-CPU-cores-with-affinity-and-priority-in-Windows/)
+- [Multiple Processors - Win32 apps | Microsoft Learn](https://learn.microsoft.com/en-us/windows/win32/procthread/multiple-processors)
+- [Processor Groups - Win32 apps | Microsoft Learn](https://learn.microsoft.com/en-us/windows/win32/procthread/processor-groups)
 
-### OCR Accuracy Metrics and Quality
-- [Analysis and Benchmarking of OCR Accuracy for Data Extraction Models (Docsumo)](https://www.docsumo.com/blogs/ocr/accuracy)
-- [The Definitive Guide to OCR Accuracy: Benchmarks and Best Practices for 2025](https://medium.com/@sanjeeva.bora/the-definitive-guide-to-ocr-accuracy-benchmarks-and-best-practices-for-2025-8116609655da)
-- [Evaluate OCR Output Quality with Character Error Rate (CER) and Word Error Rate (WER)](https://towardsdatascience.com/evaluating-ocr-output-quality-with-character-error-rate-cer-and-word-error-rate-wer-853175297510/)
-- [OCR accuracy metrics: How to calculate and improve them](https://charted.com/blog/understanding-ocr-accuracy-how-its-measured-and-why-it-matters/)
+### OCR Preprocessing & Image Processing
+- [Image preprocessing and modified adaptive thresholding for improving OCR](https://arxiv.org/abs/2111.14075)
+- [Trenton3983: Enhancing OCR Accuracy with OpenCV and PyTesseract](https://trenton3983.github.io/posts/ocr-image-processing-pytesseract-cv2/)
+- [OpenCV vs Pillow for Image Processing](https://primeprogram.medium.com/opencv-vs-pillow-which-is-better-for-image-processing-93f68ab81137)
 
-### Batch Processing Metrics and Performance
-- [How to Implement Batch Metrics (OneUpTime Blog)](https://oneuptime.com/blog/post/2026-01-30-batch-processing-metrics/view)
-- [How to Measure Batch Processing Performance (LinkedIn)](https://www.linkedin.com/advice/0/what-common-challenges-pitfalls-batch-processing)
-- [What is Batch processing? Meaning, Examples, Use Cases (TheDataOps)](https://www.thedataops.org/batch-processing/)
-- [Task Completion: Completion Metrics (FasterCapital)](https://fastercapital.com/content/Task-Completion--Completion-Metrics--Measuring-Success-with-Completion-Metrics.html)
+### Batch Processing & Caching Strategies
+- [OCR Batch Workflows: Scalable Text Extraction with ZenML](https://www.zenml.io/blog/ocr-batch-workflows-scalable-text-extraction-with-zenml)
+- [Claude Cost Optimization 2026: Batch API and Prompt Caching](https://pecollective.com/tools/claude-pricing-guide/)
+- [Batch OCR Automation: High-Volume Document Processing Lifehacks](https://mmaseis.com/batch-ocr-processing-for-documents-lifehacks/)
+
+### Early Termination & Confidence Thresholds
+- [On optimal stopping strategies for text recognition in a video stream](https://link.springer.com/article/10.1007/s10032-019-00333-0)
+- [AI for Enterprise Document Processing OCR: 2026 Guide](https://www.stackai.com/insights/ai-for-enterprise-document-processing-ocr-end-to-end-workflow-best-practices-and-2026-guide)
+- [Understanding Confidence Threshold in AI Systems](https://www.llamaindex.ai/glossary/what-is-confidence-threshold)
+
+### 2026 OCR Landscape & Trends
+- [OCR 2026: Everything You Need to Know, Trends, Tools & Tips](https://www.makoletdigimarket.com/stop-retyping-how-ocr-in-2026-actually-works-and-where-its-going/)
+- [OCR Accuracy Benchmarks: The 2026 Digital Transformation Revolution](https://medium.com/@info_59976/ocr-accuracy-benchmarks-the-2026-digital-transformation-revolution-2f7095c2696f)
+- [The Definitive Guide to OCR in 2026: From Pipelines to VLMs](https://slavadubrov.github.io/blog/2026/03/04/the-definitive-guide-to-ocr-in-2026-from-pipelines-to-vlms/)

@@ -1,1028 +1,840 @@
-# Architecture Research: Campaign Management Integration
+# Architecture Patterns: Performance Optimization Integration
 
-**Domain:** Campaign management layer for batch OCR pipeline
-**Context:** Adding interactive menu, graceful shutdown, per-folder stats to existing single-file multiprocessing architecture
-**Researched:** 2026-06-05
+**Domain:** Batch OCR Pipeline Performance Optimization
+**Researched:** 2026-06-07
 **Confidence:** HIGH
 
 ## Executive Summary
 
-Campaign management for long-running batch jobs requires **three architectural layers**: (1) **State tracking** — persistent campaign state with per-folder breakdowns, (2) **Interactive control** — menu system for resume/re-run/stats, and (3) **Graceful shutdown** — Windows-compatible Ctrl+C handling for multiprocessing.Pool cleanup. The key insight: **campaign features wrap the existing pipeline, not interleave with it**. The OCR pipeline remains unchanged; campaign logic lives in a new orchestration layer that manages checkpoints, presents menus, and handles signals.
+This document maps how performance optimizations integrate with the existing Precede OCR pipeline architecture. The current architecture uses a document-level parallelism model where multiprocessing.Pool dispatches entire PDFs to worker processes. Each worker converts PDF pages via pdf2image, runs multi-rotation OCR via pytesseract, and applies OpenCV preprocessing fallback. Performance optimizations integrate at three architectural layers: **PDF rendering** (swap pdf2image for PyMuPDF), **OCR configuration** (Tesseract config injection), and **rotation strategy** (intelligent rotation vs brute-force). The recommended build order prioritizes early measurable gains: PyMuPDF swap first (largest single speedup), then Tesseract config optimization (minimal code change, immediate benefit), then rotation strategy refinement.
 
-**Integration with existing architecture:**
-- Existing: `precede_ocr.py` (1,101 LOC) — single-file pipeline with `multiprocessing.Pool`, atomic checkpoint writes, tqdm progress
-- New: Campaign orchestration layer — pre-run menu, signal handlers, enhanced checkpoint schema, per-folder aggregation
-- Build order: (1) Enhanced state schema → (2) Menu system → (3) Signal handling → (4) Per-folder stats
+## Current Architecture Overview
+
+### Component Structure
+
+```
+precede_ocr.py (main entry point)
+├── Campaign Manager (state, resume menu, reporting)
+├── Worker Pool (multiprocessing.Pool)
+│   └── Worker Process (per PDF)
+│       ├── PDF → Pages (pdf2image)
+│       ├── Per-Page Processing
+│       │   ├── Multi-Rotation OCR (pytesseract)
+│       │   │   ├── Try 90° → regex match? → done
+│       │   │   ├── Try 270° → regex match? → done
+│       │   │   ├── Try 0° → regex match? → done
+│       │   │   └── Try 180° → regex match? → done
+│       │   └── Preprocessing Fallback (OpenCV)
+│       │       └── Retry multi-rotation OCR
+│       └── Checkpoint Writer (atomic .checkpoint.json)
+└── Output Generator (CSV + JSON)
+```
+
+### Data Flow
+
+1. **Campaign Start**: Load campaign_state.json or create new campaign
+2. **File Discovery**: Recursively glob `**/*.pdf`
+3. **Dispatch**: Pool.map(process_pdf, pdf_paths)
+4. **Worker Execution**: Each worker processes one PDF end-to-end
+5. **Per-Page Loop**: Convert page → OCR with rotations → extract IDs → accumulate results
+6. **Checkpoint**: Atomic write per-file results to .checkpoint.json
+7. **Aggregation**: Main process collects results, updates campaign_state.json
+8. **Output**: Generate CSV + JSON from accumulated checkpoint data
+
+### Key Architectural Constraints
+
+- **Windows spawn model**: Workers cannot share memory; must pass filenames not objects
+- **Coarse-grained parallelism**: One PDF per worker (not page-level parallelism)
+- **Atomic checkpoints**: Worker results must be JSON-serializable dicts
+- **No IPC overhead**: Workers accumulate results locally, return to main process
+- **Existing test coverage**: 230 tests verify pipeline behavior
 
 ---
 
-## Existing Architecture (v1.0 Baseline)
+## Performance Optimization Integration Points
 
-### Current System Overview
+### 1. PDF Rendering Layer: pdf2image → PyMuPDF
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                     precede_ocr.py (Single File)                      │
-├──────────────────────────────────────────────────────────────────────┤
-│  main()                                                               │
-│    ├─ discover_pdfs() → List[Path]                                   │
-│    ├─ load_checkpoint_if_exists() → (results, processed_files)       │
-│    ├─ filter_remaining_pdfs() → remaining PDFs                       │
-│    └─ process_all_pdfs() ────────────────────────────────────────┐   │
-│         ├─ multiprocessing.Pool(workers) ───────────────────────┐│   │
-│         │   └─ pool.imap_unordered(process_single_pdf_wrapper) ││   │
-│         │        └─ Worker: process_single_pdf() ───────────────┘│   │
-│         │             ├─ pdf2image.convert_from_path()           │   │
-│         │             ├─ For each page:                          │   │
-│         │             │    └─ extract_id_with_rotation()         │   │
-│         │             │         ├─ pytesseract OCR (4 rotations) │   │
-│         │             │         └─ preprocess_image() fallback   │   │
-│         │             └─ Return: [{filename, page, ids, ...}]    │   │
-│         ├─ tqdm progress bar with running stats                  │   │
-│         ├─ Periodic checkpoint: save_checkpoint_atomic()         │   │
-│         └─ Final checkpoint + validate_sequence()                    │
-│    ├─ write_results_csv()                                            │
-│    ├─ write_results_json()                                           │
-│    └─ calculate_batch_stats() → batch_stats.json                     │
-└──────────────────────────────────────────────────────────────────────┘
-```
-
-### Existing Components (DO NOT MODIFY)
-
-| Component | Responsibility | Entry Point | Output |
-|-----------|---------------|-------------|---------|
-| **File Discovery** | Recursive `.pdf` scan via `pathlib.Path.glob('**/*.pdf')` | `discover_pdfs(input_path)` | `List[Path]` |
-| **Worker Pool** | Parallel PDF processing with `multiprocessing.Pool.imap_unordered()` | `process_all_pdfs(pdf_paths, workers, ...)` | `List[dict]` (flat results) |
-| **Single PDF Processor** | End-to-end: PDF→images→OCR→IDs | `process_single_pdf(pdf_path)` | `[{filename, page, ids, rotation, notes}]` |
-| **OCR Pipeline** | Multi-rotation OCR + preprocessing fallback | `extract_id_with_rotation(image)` | `(ids, rotation, notes)` |
-| **Checkpoint Writer** | Atomic writes via `tempfile + os.replace` | `save_checkpoint_atomic(results, ...)` | `.checkpoint.json` |
-| **Checkpoint Loader** | Resume from `.checkpoint.json` | `load_checkpoint_if_exists(output_dir, input_path)` | `(results, processed_files)` or `None` |
-| **Sequence Validator** | Theil-Sen robust regression outlier detection | `validate_sequence(results)` | Updated results with flags |
-| **Output Writers** | CSV + JSON with pandas | `write_results_csv()`, `write_results_json()` | `results.csv`, `results.json` |
-| **Stats Calculator** | Summary metrics + performance | `calculate_batch_stats()` | `batch_stats.json` |
-
-### Existing Checkpoint Schema (v1.0)
-
-```json
-{
-  "metadata": {
-    "version": "1.0",
-    "input_path": "C:/path/to/pdfs",
-    "processed_count": 1234,
-    "timestamp": "2026-06-05T14:32:10.123456",
-    "checkpoint_frequency": 50
-  },
-  "results": [
-    {"filename": "file1.pdf", "page": 1, "ids": ["12345"], "rotation_detected": 90, "notes": ""},
-    ...
-  ],
-  "processed_files": ["file1.pdf", "file2.pdf", ...]
-}
-```
-
-### Existing Data Flow
-
-```
-CLI args → main()
-    ↓
-discover_pdfs(input_path) → List[Path]
-    ↓
-load_checkpoint_if_exists() → (checkpointed_results, processed_files) or None
-    ↓
-filter_remaining_pdfs(all_pdfs, processed_files) → remaining_pdfs
-    ↓
-process_all_pdfs(remaining_pdfs) ──────────────────────────────┐
-    ├─ multiprocessing.Pool(workers=N) ───────────────────────┐│
-    │   ├─ For each PDF: process_single_pdf_wrapper()       ││
-    │   │    └─ Worker: process_single_pdf(pdf_path)        ││
-    │   │         └─ Returns: [{filename, page, ids, ...}] ││
-    │   └─ collect results via imap_unordered              ││
-    ├─ tqdm progress bar (files_processed, IDs, errors)     ││
-    ├─ Every 50 files: save_checkpoint_atomic()             ││
-    └─ Final checkpoint ────────────────────────────────────┘│
-    ↓                                                         │
-validate_sequence(all_results) → results with outlier flags  │
-    ↓                                                         │
-write_results_csv(results) ────────────────────────────────────┘
-write_results_json(results)
-calculate_batch_stats() → batch_stats.json
-```
-
-**Key characteristics:**
-- **Single-file architecture:** All code in `precede_ocr.py` (1,101 LOC)
-- **Atomic checkpoint writes:** `tempfile.NamedTemporaryFile() + os.replace()` prevents corruption
-- **Worker isolation:** Each worker process handles one PDF end-to-end, no shared state
-- **Resume capability:** `--fresh` flag deletes checkpoint; otherwise auto-resumes from `.checkpoint.json`
-- **Error handling:** Per-file try/except, errors logged to `errors.log`, failed files get `page=0` sentinel
-
----
-
-## Campaign Management Layer (v1.1 Addition)
-
-### System Overview with Campaign Features
-
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                          Campaign Orchestrator (NEW)                          │
-├──────────────────────────────────────────────────────────────────────────────┤
-│  main_with_campaign() ────────────────────────────────────────────────────┐  │
-│    ├─ campaign = load_or_create_campaign_state() ────────────────────────┐│  │
-│    │    └─ campaign_state.json: {status, started, progress, folders, ...}││  │
-│    ├─ display_campaign_menu(campaign) ────────────────────────────────────┘│  │
-│    │    ├─ [1] Continue campaign                                           │  │
-│    │    ├─ [2] Re-run failures                                             │  │
-│    │    ├─ [3] View statistics (per-folder breakdown)                      │  │
-│    │    ├─ [4] Export partial results                                      │  │
-│    │    └─ [5] Fresh start (delete checkpoint)                             │  │
-│    ├─ setup_signal_handlers() ────────────────────────────────────────────┐│  │
-│    │    └─ signal.signal(SIGINT, graceful_shutdown_handler)              ││  │
-│    └─ run_campaign_with_shutdown(campaign) ──────────────────────────────┘│  │
-│         ├─ update_campaign_state(status='running')                         │  │
-│         ├─ process_all_pdfs() ──────────────────────── (existing pipeline) │  │
-│         │    └─ Pool shutdown: close() + join() on SIGINT                  │  │
-│         ├─ aggregate_per_folder_stats(results) ────────────────────────────┐  │
-│         │    └─ {folder_path: {total_files, ids_found, ...}}              │  │
-│         ├─ update_campaign_state(status='completed', stats=folder_stats) ─┘  │
-│         └─ write_campaign_report() → campaign_report.md                       │
-└──────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ↓ (delegates to)
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                      Existing OCR Pipeline (UNCHANGED)                        │
-│                            precede_ocr.py core                                │
-│  process_all_pdfs() → multiprocessing.Pool → workers → results               │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
-
-### New Components
-
-| Component | Responsibility | Integration Point | Implementation |
-|-----------|---------------|-------------------|----------------|
-| **Campaign State Manager** | Load/save campaign state with folder-level progress | Wraps `load_checkpoint_if_exists()` | New functions in `precede_ocr.py` |
-| **Interactive Menu** | Display resume/re-run/stats options, handle user input | Entry point before `process_all_pdfs()` | New `display_campaign_menu()` function (stdlib `input()` only) |
-| **Signal Handler** | Catch SIGINT (Ctrl+C), set shutdown event, cleanup Pool | Installed before Pool creation | `signal.signal(SIGINT, handler)` + shared `Event()` |
-| **Folder Stats Aggregator** | Group results by parent directory, calculate per-folder metrics | Post-processes `all_results` after pipeline completes | New `aggregate_per_folder_stats()` function |
-| **Campaign Report Writer** | Markdown summary with folder breakdown | Final step after stats aggregation | New `write_campaign_report()` function |
-
----
-
-## Campaign State Schema (Enhanced Checkpoint)
-
-### campaign_state.json (NEW file, supplements .checkpoint.json)
-
-```json
-{
-  "version": "1.1",
-  "campaign_id": "campaign_20260605_143210",
-  "input_path": "C:/path/to/pdfs",
-  "status": "running",
-  "started_at": "2026-06-05T14:32:10.123456",
-  "last_updated": "2026-06-05T15:45:32.987654",
-  "completed_at": null,
-  "progress": {
-    "total_files_discovered": 30429,
-    "files_processed": 1234,
-    "files_remaining": 29195,
-    "files_failed": 5,
-    "percent_complete": 4.05
-  },
-  "folder_stats": {
-    "C:/path/to/pdfs/folder1": {
-      "total_files": 150,
-      "processed": 150,
-      "ids_found": 1423,
-      "no_id_pages": 8,
-      "errors": 0
-    },
-    "C:/path/to/pdfs/folder2": {
-      "total_files": 300,
-      "processed": 120,
-      "ids_found": 567,
-      "no_id_pages": 23,
-      "errors": 2
-    }
-  },
-  "interruptions": [
-    {"timestamp": "2026-06-05T15:00:00", "reason": "SIGINT", "files_processed_at_interrupt": 500}
-  ],
-  "options": {
-    "workers": 7,
-    "checkpoint_frequency": 50,
-    "output_csv": "output/results.csv",
-    "output_json": "output/results.json"
-  }
-}
-```
-
-**Key additions vs. v1.0 checkpoint:**
-- **Campaign ID:** Unique identifier for this run (timestamp-based)
-- **Status tracking:** `running` / `interrupted` / `completed` / `failed`
-- **Folder-level stats:** Per-directory aggregation (new feature)
-- **Interruption log:** Track Ctrl+C events with timestamps
-- **Options snapshot:** Preserve CLI args for resume consistency
-
-**Relationship to .checkpoint.json:**
-- `.checkpoint.json` — **granular state** (list of all processed files, full results)
-- `campaign_state.json` — **campaign metadata** (folder stats, interruptions, progress summary)
-- Both updated atomically; campaign state references checkpoint version
-
----
-
-## Interactive Menu Pattern (Stdlib Only)
-
-### Menu Implementation (No External Dependencies)
+**Current Implementation:**
 
 ```python
-def display_campaign_menu(campaign_state: dict) -> str:
-    """
-    Display interactive menu for campaign actions.
-    Returns selected action: 'continue' / 're-run' / 'stats' / 'export' / 'fresh'
-    """
-    print("\n" + "="*60)
-    print("CAMPAIGN MENU")
-    print("="*60)
-    print(f"Campaign ID: {campaign_state['campaign_id']}")
-    print(f"Status: {campaign_state['status']}")
-    print(f"Progress: {campaign_state['progress']['percent_complete']:.1f}%")
-    print(f"  Files: {campaign_state['progress']['files_processed']} / "
-          f"{campaign_state['progress']['total_files_discovered']}")
-    print(f"  Errors: {campaign_state['progress']['files_failed']}")
-    print("\nOptions:")
-    print("  [1] Continue campaign")
-    print("  [2] Re-run failed files only")
-    print("  [3] View per-folder statistics")
-    print("  [4] Export partial results (CSV + JSON)")
-    print("  [5] Fresh start (delete checkpoint)")
-    print("  [Q] Quit")
-    print("="*60)
-
-    while True:
-        choice = input("\nSelect option [1-5, Q]: ").strip().upper()
-        if choice == '1':
-            return 'continue'
-        elif choice == '2':
-            return 're-run-failures'
-        elif choice == '3':
-            display_folder_stats(campaign_state)
-            # Loop back to menu after displaying stats
-        elif choice == '4':
-            return 'export'
-        elif choice == '5':
-            confirm = input("Delete checkpoint and start fresh? [y/N]: ").strip().lower()
-            if confirm == 'y':
-                return 'fresh'
-            else:
-                print("Cancelled.")
-        elif choice == 'Q':
-            return 'quit'
-        else:
-            print("Invalid option. Please enter 1-5 or Q.")
-
-def display_folder_stats(campaign_state: dict) -> None:
-    """Print per-folder statistics table."""
-    print("\n" + "="*80)
-    print("PER-FOLDER STATISTICS")
-    print("="*80)
-    print(f"{'Folder':<50} {'Files':<8} {'IDs':<8} {'No-ID':<8} {'Errors':<8}")
-    print("-"*80)
-
-    folder_stats = campaign_state.get('folder_stats', {})
-    for folder, stats in sorted(folder_stats.items()):
-        folder_name = Path(folder).name or folder  # Show basename only
-        print(f"{folder_name:<50} {stats['processed']:<8} {stats['ids_found']:<8} "
-              f"{stats['no_id_pages']:<8} {stats['errors']:<8}")
-
-    print("="*80)
-    input("\nPress Enter to return to menu...")
+# Located in: page processing function
+from pdf2image import convert_from_path
+pages = convert_from_path(
+    pdf_path,
+    dpi=300,
+    output_folder=temp_dir,
+    paths_only=True  # Memory safety
+)
 ```
 
-**Why stdlib only:**
-- **No new dependencies:** Avoids adding libraries like `simple-term-menu` or `console-menu`
-- **Windows compatibility:** `input()` works universally; curses-based menus fail on Windows without `windows-curses`
-- **Simplicity:** Menu is pre-run only, not real-time during processing (tqdm handles progress)
-- **Low complexity:** ~50 LOC for menu logic, easy to maintain
-
----
-
-## Graceful Shutdown Architecture (Windows-Compatible)
-
-### Signal Handling Strategy
-
-**Key constraint:** Windows doesn't support Unix signals fully. `SIGTERM` doesn't exist; only `SIGINT` (Ctrl+C) and `SIGBREAK` (Ctrl+Break) are available.
-
-**Recommended pattern:** Use `signal.signal(SIGINT, handler)` + `multiprocessing.Event()` for cross-platform graceful shutdown.
-
-### Implementation Pattern
+**PyMuPDF Integration:**
 
 ```python
-import signal
-import multiprocessing as mp
-from typing import Optional
-
-# Module-level shutdown event (shared with workers via Pool initializer)
-_shutdown_event: Optional[mp.Event] = None
-_pool: Optional[mp.Pool] = None
-
-def init_worker(shutdown_event: mp.Event):
-    """
-    Worker initializer: set global shutdown event.
-    Called once per worker process when Pool is created.
-    """
-    global _shutdown_event
-    _shutdown_event = shutdown_event
-
-def signal_handler(signum, frame):
-    """
-    SIGINT handler: set shutdown event and initiate graceful pool shutdown.
-    """
-    print("\n\nReceived interrupt signal (Ctrl+C). Finishing current files...")
-    print("Press Ctrl+C again to force quit (may lose checkpoint integrity).\n")
-
-    if _shutdown_event:
-        _shutdown_event.set()  # Signal workers to stop accepting new work
-
-    if _pool:
-        _pool.close()  # Prevent new task submission
-        # Pool.join() will be called in main after loop exits
-
-def process_all_pdfs_with_shutdown(
-    pdf_paths: list[Path],
-    workers: int,
-    shutdown_event: mp.Event,
-    **kwargs
-) -> list[dict]:
-    """
-    Enhanced process_all_pdfs with graceful shutdown support.
-    """
-    global _pool
-
-    all_results = []
-    processed_files = set()
-
-    with mp.Pool(
-        processes=workers,
-        initializer=init_worker,
-        initargs=(shutdown_event,),
-        maxtasksperchild=50
-    ) as pool:
-        _pool = pool  # Store for signal handler access
-
-        pbar = tqdm(total=len(pdf_paths), desc="Processing PDFs", unit="file")
-
-        try:
-            for file_results in pool.imap_unordered(
-                process_single_pdf_wrapper,
-                pdf_paths,
-                chunksize=10
-            ):
-                all_results.extend(file_results)
-                processed_files.add(file_results[0]['filename'])
-                pbar.update(1)
-
-                # Check shutdown event
-                if shutdown_event.is_set():
-                    print("Shutdown event detected. Stopping after current batch...")
-                    break  # Exit loop, Pool.close() + join() happens via context manager
-
-                # Periodic checkpoint (unchanged)
-                if len(processed_files) % 50 == 0:
-                    save_checkpoint_atomic(all_results, processed_files, ...)
-
-        except KeyboardInterrupt:
-            # Second Ctrl+C: forceful shutdown
-            print("\nForced shutdown. Saving checkpoint...")
-            save_checkpoint_atomic(all_results, processed_files, ...)
-            raise
-
-        finally:
-            pbar.close()
-            _pool = None
-
-    # Context manager handles pool.close() + pool.join()
-    return all_results
-
-def main_with_campaign(input_path: str, **kwargs):
-    """
-    Campaign-aware main entry point.
-    """
-    shutdown_event = mp.Event()
-
-    # Install signal handler
-    signal.signal(signal.SIGINT, signal_handler)
-
-    # Load or create campaign state
-    campaign_state = load_or_create_campaign_state(input_path, kwargs)
-
-    # Display menu
-    action = display_campaign_menu(campaign_state)
-
-    if action == 'quit':
-        return
-    elif action == 'fresh':
-        delete_checkpoint()
-        campaign_state = create_fresh_campaign_state(input_path, kwargs)
-
-    # Run pipeline with shutdown support
-    try:
-        all_results = process_all_pdfs_with_shutdown(
-            pdf_paths,
-            workers=kwargs.get('workers', mp.cpu_count() - 1),
-            shutdown_event=shutdown_event,
-            **kwargs
-        )
-
-        # Post-processing
-        folder_stats = aggregate_per_folder_stats(all_results)
-        update_campaign_state(campaign_state, status='completed', stats=folder_stats)
-        write_campaign_report(campaign_state, folder_stats)
-
-    except KeyboardInterrupt:
-        update_campaign_state(campaign_state, status='interrupted')
-        print("Campaign interrupted. Resume with same command to continue.")
-        sys.exit(130)  # Standard Unix exit code for SIGINT
+# New approach
+import pymupdf  # Replaces pdf2image import
+doc = pymupdf.open(pdf_path)
+for page_num in range(len(doc)):
+    page = doc[page_num]
+    pix = page.get_pixmap(dpi=300)  # Direct DPI parameter (v1.19.2+)
+    # Convert to PIL Image for pytesseract compatibility
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    # Continue with existing OCR pipeline
 ```
 
-### Shutdown Sequence
+**API Differences:**
+
+| Aspect | pdf2image | PyMuPDF |
+|--------|-----------|---------|
+| **Import** | `from pdf2image import convert_from_path` | `import pymupdf` |
+| **Page Extraction** | Batch conversion: `convert_from_path()` | Iterator: `doc = pymupdf.open(); doc[page_num]` |
+| **DPI Control** | `dpi=300` parameter | `page.get_pixmap(dpi=300)` or `matrix=Matrix(300/72, 300/72)` |
+| **Output Format** | PIL Images or file paths | Pixmap objects (convert via PIL) |
+| **Memory Model** | Temp files on disk (paths_only) or PIL list | Pixmap objects in memory (must convert/dispose) |
+| **Dependencies** | Requires Poppler binaries | Zero external dependencies |
+| **Performance** | 10s for 7-page PDF | 800ms-3s for same PDF (3-12× faster) |
+
+**Integration Strategy:**
+
+**Option A: Minimal Refactor** (Recommended for early measurement)
+- Create adapter function: `get_page_as_pil_image(pdf_path, page_num) -> PIL.Image`
+- Replace `convert_from_path()` call with loop over `range(len(doc))`
+- Maintain PIL Image interface downstream (no OCR code changes)
+- Explicitly dispose of pixmap objects: `pix = None` after conversion
+
+**Option B: Native PyMuPDF Pipeline**
+- Pass pixmap objects directly to pytesseract (pytesseract accepts PIL, numpy, or bytes)
+- Eliminate PIL conversion overhead
+- Requires refactoring downstream image handling code
+- Higher risk; defer until Option A validated
+
+**Modified Components:**
+- PDF page extraction function (currently wraps pdf2image)
+- Worker process initialization (import change)
+- Temp directory cleanup logic (PyMuPDF doesn't use temp files unless explicitly saving)
+
+**New Components:**
+- PyMuPDF pixmap → PIL Image adapter (if using Option A)
+- Memory management wrapper to dispose pixmaps (prevent accumulation)
+
+**Data Flow Changes:**
 
 ```
-User presses Ctrl+C
-    ↓
-SIGINT signal → signal_handler()
-    ├─ Print "Finishing current files..." message
-    ├─ shutdown_event.set() (notify workers)
-    ├─ pool.close() (prevent new task submission)
-    └─ (pool.join() deferred to context manager)
-    ↓
-Main loop checks shutdown_event.is_set()
-    ├─ If True: break loop (exit imap_unordered iteration)
-    └─ Else: continue processing
-    ↓
-Context manager __exit__()
-    ├─ pool.close() (already called by handler, idempotent)
-    ├─ pool.join() (wait for in-flight tasks to complete)
-    └─ pool.terminate() only if join() times out (emergency)
-    ↓
-save_checkpoint_atomic(all_results, ...) (final state)
-update_campaign_state(status='interrupted')
-    ↓
-Exit with code 130
+BEFORE:
+PDF → convert_from_path() → List[PIL.Image] or List[Path] → per-page OCR
+
+AFTER (Option A):
+PDF → pymupdf.open() → doc[page_num] → get_pixmap(dpi=300) → PIL.frombytes() → per-page OCR
+                                                                  ↓
+                                                              pix = None (dispose)
 ```
 
-**Windows-specific notes:**
-- **No SIGTERM:** Only handle SIGINT (Ctrl+C). Don't register SIGTERM handlers (not available on Windows).
-- **No SIGKILL:** `pool.terminate()` uses `TerminateProcess()` API on Windows, not SIGKILL.
-- **Second Ctrl+C:** Raises `KeyboardInterrupt` exception, caught in `except` block for forceful shutdown.
+**Memory Implications:**
 
-### Why This Pattern Works
+- **pdf2image**: Uses disk temp files when `paths_only=True`; minimal memory footprint
+- **PyMuPDF**: Pixmap objects ~25 MB per page (A4, RGB, 595×842px at 300 DPI)
+- **Mitigation**: Convert pixmap → PIL → dispose pixmap immediately (per-page loop)
+- **Risk**: Accumulating pixmaps across pages = OOM; critical to dispose after conversion
 
-| Requirement | How Pattern Addresses It |
-|-------------|--------------------------|
-| **Graceful shutdown** | `pool.close()` stops accepting new tasks; workers finish current PDF before exiting |
-| **No data loss** | `save_checkpoint_atomic()` in `finally` block ensures state persisted even on interrupt |
-| **Windows compatibility** | Uses `Event()` for IPC, not Unix-only signals like SIGTERM |
-| **User feedback** | Clear message: "Finishing current files... Press Ctrl+C again to force quit" |
-| **Resume capability** | Campaign state marked `interrupted`, next run auto-resumes from menu |
+**Confidence:** HIGH — PyMuPDF official docs, API verified, performance benchmarks from multiple sources
 
 ---
 
-## Per-Folder Statistics Architecture
+### 2. OCR Configuration Layer: Tesseract Parameter Injection
 
-### Folder Aggregation Strategy
-
-**Challenge:** Results are flat list of `{filename, page, ids, ...}` dicts. Need to group by parent directory and calculate folder-level metrics.
-
-**Solution:** Post-process results after pipeline completes, group by `Path(filename).parent`, aggregate stats.
-
-### Implementation
+**Current Implementation:**
 
 ```python
-from pathlib import Path
-from collections import defaultdict
-
-def aggregate_per_folder_stats(all_results: list[dict], input_path: str) -> dict:
-    """
-    Aggregate results into per-folder statistics.
-
-    Args:
-        all_results: Flat list of result dicts from process_all_pdfs()
-        input_path: Root directory path (to calculate relative folder paths)
-
-    Returns:
-        Dict mapping folder path to {total_files, processed, ids_found, ...}
-    """
-    input_root = Path(input_path).resolve()
-
-    # Group results by filename first
-    by_file = defaultdict(list)
-    for r in all_results:
-        by_file[r['filename']].append(r)
-
-    # Then group files by parent folder
-    folder_stats = defaultdict(lambda: {
-        'total_files': 0,
-        'processed': 0,
-        'ids_found': 0,
-        'no_id_pages': 0,
-        'errors': 0
-    })
-
-    for filename, file_results in by_file.items():
-        # Find parent folder relative to input_path
-        # Note: filename is basename only, need to discover full path from original PDF list
-        # For now, use flat structure assumption; for nested dirs, store full paths in results
-        folder_path = str(input_root)  # Simplified; enhance to track actual parent dirs
-
-        folder_stats[folder_path]['total_files'] += 1
-        folder_stats[folder_path]['processed'] += 1
-
-        # Count IDs and no-ID pages
-        for r in file_results:
-            if 'error:' in r.get('notes', ''):
-                folder_stats[folder_path]['errors'] += 1
-            elif r['ids']:
-                folder_stats[folder_path]['ids_found'] += len(r['ids'])
-            else:
-                folder_stats[folder_path]['no_id_pages'] += 1
-
-    return dict(folder_stats)
+# Located in: OCR function
+import pytesseract
+text = pytesseract.image_to_string(image)
+# Uses Tesseract defaults: PSM 3, OEM 3, all characters
 ```
 
-**Enhancement for nested directories:**
-Currently, `process_single_pdf()` returns `filename: Path(pdf_path).name` (basename only). To enable per-folder stats:
-
-**Option 1 (Minimal change):** Add `folder_path` field to result dicts in `process_single_pdf_wrapper()`:
+**Optimized Configuration:**
 
 ```python
-def process_single_pdf_wrapper(pdf_path: Path) -> list[dict]:
-    """Enhanced wrapper with folder tracking."""
-    results = process_single_pdf(str(pdf_path), debug=False)
-
-    # Inject folder path into each result dict
-    folder_path = str(pdf_path.parent)
-    for r in results:
-        r['folder_path'] = folder_path
-
-    return results
+# Tesseract config string for digit-only extraction
+custom_config = r'--psm 6 --oem 1 -c tessedit_char_whitelist=0123456789'
+text = pytesseract.image_to_string(image, config=custom_config)
 ```
 
-**Option 2 (Post-process with discovery):** Rebuild folder mapping from original `pdf_paths` list using filename lookups. More complex but avoids changing result schema.
+**Configuration Parameters Explained:**
 
-**Recommendation:** Use Option 1. Small change to wrapper, clean folder tracking.
+| Parameter | Value | Purpose | Rationale |
+|-----------|-------|---------|-----------|
+| `--psm 6` | Uniform block of text | OCR treats page as single text block | Better than PSM 3 (full page structure) or PSM 7 (single line) for scanned docs with isolated IDs. Project has IDs on relatively uniform backgrounds. |
+| `--oem 1` | LSTM neural net only | Use modern neural network OCR engine | OEM 1 (LSTM only) faster than OEM 3 (default/auto). Legacy engine (OEM 0) not needed for scanned digits. OEM 2 (legacy + LSTM) slower, unnecessary. |
+| `-c tessedit_char_whitelist=0123456789` | Digits only | Restrict OCR to 0-9 characters | Eliminates false positives from letters (O→0, I→1, S→5). Current pipeline has normalization step; whitelist makes it unnecessary. |
 
-### Folder Stats Output
+**Alternative PSM Modes Considered:**
 
-**Console display:**
-```
-================================================================================
-PER-FOLDER STATISTICS
-================================================================================
-Folder                                             Files    IDs      No-ID    Errors
---------------------------------------------------------------------------------
-folder1                                            150      1423     8        0
-folder2                                            300      567      23       2
-subfolder/nested                                   50       234      1        0
-================================================================================
-```
+- **PSM 7** (single text line): Too restrictive; IDs may not be perfectly aligned
+- **PSM 8** (single word): Better for 2-4 digit sequences, but project has 5-digit IDs
+- **PSM 10** (single character): Requires pre-segmentation; adds complexity without gain
+- **PSM 13** (raw line, bypass hacks): Last resort for unusual fonts; not needed
 
-**campaign_report.md:**
-```markdown
-# Campaign Report
+**Integration Points:**
 
-**Campaign ID:** campaign_20260605_143210
-**Status:** Completed
-**Duration:** 2 hours 15 minutes
-**Total Files:** 30,429
-**Total IDs Extracted:** 287,543
+**Modified Components:**
+- Multi-rotation OCR function (add `config` parameter to `pytesseract.image_to_string()`)
+- Preprocessing fallback OCR (same config injection)
 
-## Per-Folder Breakdown
+**New Components:**
+- None (pure configuration change)
 
-| Folder | Files | IDs Found | No-ID Pages | Errors |
-|--------|-------|-----------|-------------|--------|
-| folder1 | 150 | 1,423 | 8 | 0 |
-| folder2 | 300 | 567 | 23 | 2 |
-| subfolder/nested | 50 | 234 | 1 | 0 |
+**Data Flow Changes:**
+- No structural changes; same image → OCR → text flow
+- Internal Tesseract behavior changes (character recognition constrained to digits)
 
-## Problem Areas
+**Testing Implications:**
+- Existing regex validation (`\d{5}`) remains unchanged
+- Character normalization step (O→0, I→1, S→5) becomes redundant but harmless
+- Test corpus should see accuracy improvement (fewer false matches)
 
-- **folder2:** 2 errors, 23 no-ID pages (7.7% failure rate) — investigate low-quality scans
-- **subfolder/nested:** 2% no-ID rate — acceptable
+**Build Order Consideration:**
+- **Zero risk**: Config string doesn't break existing code if wrong
+- **Immediate benefit**: Can apply to current codebase without PyMuPDF swap
+- **Reversible**: Remove config string to revert to defaults
 
-## Recommendations
-
-- Re-run folder2 with `--debug` flag to diagnose errors
-- Check folder2 scan quality (possible scanner issue)
-```
+**Confidence:** HIGH — Official pytesseract documentation, Tesseract PSM/OEM docs, PyImageSearch tutorials
 
 ---
 
-## Build Order and Integration Points
+### 3. Rotation Strategy Layer: Intelligent vs Brute-Force
 
-### Phase 1: Enhanced Campaign State Schema
+**Current Implementation (Brute-Force):**
 
-**Goal:** Extend checkpoint with campaign metadata and folder stats.
-
-**Changes:**
-1. Create `campaign_state.json` schema (separate from `.checkpoint.json`)
-2. Add `load_or_create_campaign_state()` function
-3. Add `update_campaign_state()` for atomic updates
-4. Add `folder_path` field to result dicts in `process_single_pdf_wrapper()`
-
-**Integration points:**
-- Wraps existing `load_checkpoint_if_exists()` — no changes to checkpoint logic
-- New file alongside `.checkpoint.json` in output directory
-- Result dict schema change is **additive** (adds `folder_path`, doesn't remove fields)
-
-**Success criteria:**
-- `campaign_state.json` created on first run
-- Folder stats populated correctly for nested directories
-- Backward compatible: v1.0 code can still read v1.1 checkpoints (ignores new fields)
-
----
-
-### Phase 2: Interactive Menu System
-
-**Goal:** Pre-run menu for continue/re-run/stats/fresh actions.
-
-**Changes:**
-1. Add `display_campaign_menu()` function (stdlib `input()` only)
-2. Add `display_folder_stats()` helper for stats view
-3. Wrap `main()` with `main_with_campaign()` entry point
-4. Add menu action handlers: continue, re-run failures, export, fresh
-
-**Integration points:**
-- Calls existing `load_checkpoint_if_exists()` to populate menu state
-- Menu action 'continue' → calls existing `process_all_pdfs()` unchanged
-- Menu action 'fresh' → calls existing `delete_checkpoint()` logic (enhance for campaign_state.json)
-- Menu action 're-run' → filters `pdf_paths` to failed files only from campaign state
-
-**Success criteria:**
-- Menu displays on startup if checkpoint exists
-- Fresh start deletes both `.checkpoint.json` and `campaign_state.json`
-- Re-run failures filters to error files only
-- Stats view shows per-folder breakdown without running pipeline
-
-**No changes to:** OCR pipeline, multiprocessing logic, checkpoint writes
-
----
-
-### Phase 3: Graceful Shutdown (Signal Handling)
-
-**Goal:** Ctrl+C stops pipeline gracefully, saves state, allows resume.
-
-**Changes:**
-1. Add `signal.signal(SIGINT, signal_handler)` in `main_with_campaign()`
-2. Create `multiprocessing.Event()` for shutdown coordination
-3. Modify `process_all_pdfs()` → `process_all_pdfs_with_shutdown()`:
-   - Pass `shutdown_event` to Pool initializer
-   - Check `shutdown_event.is_set()` in main loop
-   - Break loop if event is set
-4. Update campaign state to `status='interrupted'` on SIGINT
-5. Add second Ctrl+C handling (forceful shutdown with warning)
-
-**Integration points:**
-- **Minimal changes to core loop:** Only adds `if shutdown_event.is_set(): break`
-- **Pool management:** Uses context manager (`with Pool() as pool`) for automatic cleanup
-- **Checkpoint writes:** Final checkpoint in `finally` block (already exists, unchanged)
-- **Campaign state:** New `update_campaign_state()` call in exception handler
-
-**Windows-specific considerations:**
-- Only handle SIGINT (Ctrl+C), not SIGTERM (doesn't exist on Windows)
-- Use `Event()` for IPC, not signals, for cross-platform compatibility
-- Test on Windows: `pool.close()` + `pool.join()` sequence works correctly
-
-**Success criteria:**
-- First Ctrl+C: Prints "Finishing current files...", waits for in-flight tasks, saves checkpoint
-- Second Ctrl+C: Immediate exit, checkpoint saved in `except KeyboardInterrupt` block
-- Campaign state marked `interrupted`, next run shows resume option in menu
-- No zombie processes on Windows after shutdown
-
-**No changes to:** Worker function logic, OCR pipeline, checkpoint format (campaign state adds interruption log)
-
----
-
-### Phase 4: Per-Folder Statistics & Reporting
-
-**Goal:** Aggregate results by folder, display in menu and generate campaign report.
-
-**Changes:**
-1. Add `aggregate_per_folder_stats()` function (post-processes `all_results`)
-2. Enhance `display_folder_stats()` to show per-folder table
-3. Add `write_campaign_report()` for Markdown summary
-4. Update `campaign_state.json` with folder stats after pipeline completes
-
-**Integration points:**
-- Runs **after** `process_all_pdfs()` completes (post-processing step)
-- Uses `folder_path` field added in Phase 1
-- No changes to pipeline or checkpoint logic
-- Campaign report written alongside `results.csv` and `batch_stats.json`
-
-**Success criteria:**
-- Folder stats calculated correctly for nested directory structures
-- Menu option [3] displays per-folder table
-- `campaign_report.md` generated with folder breakdown and problem area highlights
-- Campaign state includes folder stats for resume scenarios
-
-**No changes to:** OCR pipeline, multiprocessing, checkpoint writes (only adds post-processing)
-
----
-
-## Data Flow with Campaign Features
-
-### Startup Flow (New)
-
-```
-CLI invocation: python precede_ocr.py <input_path> [options]
-    ↓
-main_with_campaign() (NEW)
-    ├─ load_or_create_campaign_state()
-    │    ├─ Check campaign_state.json exists?
-    │    │    YES: Load campaign metadata
-    │    │    NO: Create fresh campaign state
-    │    └─ Check .checkpoint.json exists?
-    │         YES: Load processed_files, results
-    │         NO: Empty checkpoint state
-    ↓
-display_campaign_menu(campaign_state)
-    ├─ Show: Campaign ID, status, progress %, folder stats
-    ├─ Options: [1] Continue, [2] Re-run failures, [3] Stats, [4] Export, [5] Fresh
-    └─ User selects action
-    ↓
-Action dispatcher:
-    ├─ [1] Continue → process_all_pdfs_with_shutdown(remaining_pdfs)
-    ├─ [2] Re-run → filter failed files → process_all_pdfs_with_shutdown(failed_pdfs)
-    ├─ [3] Stats → display_folder_stats() → loop back to menu
-    ├─ [4] Export → write_results_csv/json from checkpoint → exit
-    └─ [5] Fresh → delete checkpoints → create_fresh_campaign_state() → continue
-    ↓
-setup_signal_handlers()
-    └─ signal.signal(SIGINT, signal_handler)
-    ↓
-process_all_pdfs_with_shutdown() (ENHANCED existing function)
+```python
+# Multi-rotation OCR: try all 4 rotations until regex match
+rotations = [90, 270, 0, 180]
+for angle in rotations:
+    rotated_image = image.rotate(angle, expand=True)
+    text = pytesseract.image_to_string(rotated_image)
+    ids = extract_ids_regex(text)  # \d{5}
+    if ids:
+        return ids, angle
+# If all fail, trigger preprocessing fallback
 ```
 
-### Processing Flow with Shutdown Support (Enhanced)
+**Current Performance:**
+- Best case: 1 OCR pass (90° correct)
+- Worst case: 4 OCR passes (180° correct or all fail)
+- Average: ~2.5 OCR passes per page (assuming uniform distribution)
 
-```
-process_all_pdfs_with_shutdown(pdf_paths, shutdown_event)
-    ↓
-Create multiprocessing.Pool(initializer=init_worker, initargs=(shutdown_event,))
-    ↓
-Main loop: for results in pool.imap_unordered(process_single_pdf_wrapper, pdf_paths):
-    ├─ Collect results
-    ├─ Update tqdm progress bar
-    ├─ Check shutdown_event.is_set()?
-    │    YES: break loop (graceful exit)
-    │    NO: continue
-    ├─ Every 50 files: save_checkpoint_atomic() (UNCHANGED)
-    └─ Append to all_results
-    ↓
-Pool.__exit__() via context manager:
-    ├─ pool.close() (if not already closed by signal handler)
-    ├─ pool.join() (wait for workers)
-    └─ Cleanup
-    ↓
-Final checkpoint save (UNCHANGED)
-    ↓
-Post-processing (NEW):
-    ├─ aggregate_per_folder_stats(all_results) → folder_stats
-    ├─ update_campaign_state(status='completed', stats=folder_stats)
-    └─ write_campaign_report(campaign_state, folder_stats)
+**Optimization Strategy A: OSD Pre-Detection**
+
+```python
+# Use Tesseract OSD (Orientation and Script Detection)
+osd = pytesseract.image_to_osd(image)
+# Parse rotation angle from OSD output
+# Single rotation OCR at detected angle
 ```
 
-### Interrupt Flow (New)
+**OSD Tradeoffs:**
 
-```
-User presses Ctrl+C during processing
-    ↓
-SIGINT → signal_handler()
-    ├─ Print "Finishing current files..." message
-    ├─ shutdown_event.set()
-    ├─ pool.close() (prevent new tasks)
-    └─ Return from handler
-    ↓
-Main loop iteration:
-    ├─ Check shutdown_event.is_set() → True
-    ├─ break loop
-    └─ Pool context manager __exit__() calls pool.join()
-    ↓
-finally block:
-    ├─ save_checkpoint_atomic() (UNCHANGED)
-    └─ update_campaign_state(status='interrupted', interruptions=[...])
-    ↓
-Exit with code 130
-    ↓
-Next invocation:
-    ├─ load_campaign_state() sees status='interrupted'
-    ├─ Menu shows "Resume interrupted campaign?"
-    └─ User selects [1] Continue → resumes from checkpoint
+| Aspect | OSD Pre-Detection | Current Multi-Pass |
+|--------|-------------------|-------------------|
+| **OCR Passes** | 1 (OSD) + 1 (OCR) = 2 total | 1-4 OCR passes (avg 2.5) |
+| **Speed** | OSD faster than full OCR | Multiple full OCR passes |
+| **Accuracy** | OSD unreliable per GitHub issues | Regex validation guarantees correctness |
+| **Failure Mode** | Wrong rotation → fallback to multi-pass | Brute-force always tries all rotations |
+| **Code Complexity** | Parse OSD output, handle errors | Simple loop |
+
+**Known OSD Issues:**
+- [Tesseract Issue #4426](https://github.com/tesseract-ocr/tesseract/issues/4426): "Poor Rotation / Layout detection" (June 2025)
+- Community reports: OSD confidence scores unreliable on scanned documents
+- Project's existing approach avoids OSD for good reason
+
+**Optimization Strategy B: Smarter Rotation Order**
+
+```python
+# Track rotation distribution from campaign_state.json
+# Order rotations by historical frequency
+# Most common rotation first (e.g., 90° → 270° → 0° → 180°)
+rotations_by_frequency = get_rotation_order_from_stats()
+for angle in rotations_by_frequency:
+    # Same loop as current implementation
 ```
 
----
+**Strategy B Tradeoffs:**
 
-## Anti-Patterns to Avoid
+| Aspect | Frequency-Ordered | Current Fixed Order |
+|--------|-------------------|---------------------|
+| **Best Case** | 1 pass (same) | 1 pass |
+| **Average Case** | ~1.5 passes (if 90° is 70% of corpus) | 2.5 passes |
+| **Worst Case** | 4 passes (same) | 4 passes |
+| **Code Changes** | Read campaign stats, reorder list | None |
+| **Risk** | Corpus-specific optimization (brittle) | Universal |
 
-### Anti-Pattern 1: Interleaving Campaign Logic with OCR Pipeline
+**Optimization Strategy C: Early-Exit Heuristics**
 
-**What people might do:** Add campaign state checks and menu logic inside `process_all_pdfs()` or worker functions.
+```python
+# Confidence-based early exit (requires image_to_data)
+rotations = [90, 270, 0, 180]
+for angle in rotations:
+    rotated_image = image.rotate(angle, expand=True)
+    data = pytesseract.image_to_data(rotated_image, output_type=Output.DICT, config=custom_config)
+    # Check confidence scores
+    if high_confidence_five_digit_id(data):
+        return extract_ids(data), angle
+# Fallback to remaining rotations if low confidence
+```
 
-**Why it's wrong:**
-- Couples campaign management to core OCR logic (breaks separation of concerns)
-- Makes testing harder (can't test pipeline without campaign layer)
-- Worker processes shouldn't know about campaign state (only shutdown event)
+**Strategy C Tradeoffs:**
 
-**Do this instead:** **Campaign layer wraps pipeline, doesn't modify it.** Menu and state management happen **before** and **after** `process_all_pdfs()`, not during. Workers only check shutdown event.
+| Aspect | Confidence Heuristics | Current Regex Match |
+|--------|-----------------------|---------------------|
+| **Early Exit** | Exit on high-confidence match | Exit on any regex match |
+| **OCR Calls** | 1-4 (same as current) | 1-4 (current) |
+| **Complexity** | Parse confidence scores, define thresholds | Simple regex |
+| **Accuracy** | Tesseract confidence may not align with ID validity | Regex directly validates 5-digit pattern |
+| **Benefit** | Minimal (regex already provides strong signal) | Baseline |
 
----
+**Recommendation:**
 
-### Anti-Pattern 2: Relying on SIGTERM for Windows Compatibility
+**Strategy B (Frequency-Ordered Rotations)** offers best risk/reward:
+- **Measurable gain**: If 90° is dominant rotation (~70%), reduces avg passes from 2.5 → 1.5 (40% reduction)
+- **Low risk**: Simple list reordering; regex validation unchanged
+- **Incremental**: Apply after PyMuPDF and config optimizations validated
+- **Data-driven**: Campaign stats already track rotation distribution
 
-**What people might do:** Register `signal.signal(SIGTERM, handler)` for graceful shutdown.
+**Defer OSD** until proven necessary:
+- Current multi-pass with regex validation is reliable
+- OSD adds complexity without guaranteed benefit
+- GitHub issues indicate OSD unreliability on scanned docs
 
-**Why it's wrong:**
-- SIGTERM doesn't exist on Windows (raises `AttributeError`)
-- Windows only supports SIGINT (Ctrl+C) and SIGBREAK (Ctrl+Break)
-- Code becomes platform-specific, breaks on Windows
+**Skip Strategy C** (confidence heuristics):
+- Regex match provides stronger signal than confidence scores
+- Minimal benefit for added complexity
 
-**Do this instead:** **Only handle SIGINT** (Ctrl+C), which works on both Windows and Unix. Use `multiprocessing.Event()` for cross-platform IPC instead of relying on signals.
+**Integration Points:**
 
----
+**Modified Components:**
+- Multi-rotation OCR function (reorder rotations list based on campaign stats)
+- Campaign state loader (expose rotation distribution stats)
 
-### Anti-Pattern 3: Modifying Result Schema for Campaign Features
+**New Components:**
+- Rotation frequency analyzer (read campaign_state.json, return ordered rotation list)
 
-**What people might do:** Add campaign-specific fields like `campaign_id`, `status` to individual result dicts.
+**Data Flow Changes:**
+- No structural changes; rotation order becomes dynamic instead of static
 
-**Why it's wrong:**
-- Result dicts represent **page-level data** (filename, page, ids, rotation)
-- Campaign metadata belongs in **campaign state**, not page results
-- Pollutes result schema with orchestration concerns
-- Breaks backward compatibility with v1.0 checkpoints
-
-**Do this instead:** **Keep result schema unchanged.** Add `folder_path` field only (Phase 1) for per-folder stats. Campaign metadata lives in `campaign_state.json`, separate from `.checkpoint.json`.
-
----
-
-### Anti-Pattern 4: Using External Menu Libraries
-
-**What people might do:** Add dependencies like `simple-term-menu`, `console-menu`, `pick` for interactive menus.
-
-**Why it's wrong:**
-- Adds new dependencies (project currently has minimal deps)
-- Some libraries don't work on Windows without extra setup (`curses` requires `windows-curses`)
-- Menu is pre-run only (not real-time), doesn't need fancy features
-- Over-engineering for simple "select 1-5" use case
-
-**Do this instead:** **Use stdlib `input()` only.** Simple text menu with number selection. Works on all platforms, zero dependencies, easy to maintain.
-
----
-
-### Anti-Pattern 5: Blocking Shutdown Until All Files Complete
-
-**What people might do:** Ignore shutdown event in main loop, always process all remaining PDFs before exiting.
-
-**Why it's wrong:**
-- User expects Ctrl+C to stop "soon", not after potentially hours of remaining work
-- Poor UX: "Why isn't it stopping?"
-- Defeats purpose of graceful shutdown (should finish current file, not all files)
-
-**Do this instead:** **Check shutdown event in main loop, break immediately.** Finish only in-flight tasks (files already submitted to workers), not entire queue. Message: "Finishing current files..." (plural refers to ~N workers, not all 30K files).
+**Confidence:** MEDIUM — Strategy B relies on corpus characteristics; OSD reliability concerns documented in GitHub issues
 
 ---
 
-### Anti-Pattern 6: Storing Full Results in Campaign State
+### 4. Parallelism Architecture: Document-Level vs Page-Level
 
-**What people might do:** Duplicate `all_results` list in `campaign_state.json` for quick access.
+**Current Architecture: Document-Level Parallelism**
 
-**Why it's wrong:**
-- Results already stored in `.checkpoint.json` (single source of truth)
-- Campaign state file becomes massive (30K PDFs × pages × result dicts = GB)
-- Slow to load on resume
-- Risk of inconsistency (two copies of results)
+```python
+# Main process
+with multiprocessing.Pool(processes=num_workers) as pool:
+    results = pool.map(process_pdf, pdf_paths)
+```
 
-**Do this instead:** **Campaign state stores only aggregates and metadata.** Full results live in `.checkpoint.json` only. Campaign state references checkpoint version, stores folder stats (aggregated), not raw results.
+**Current Model:**
+- One worker process per PDF
+- Worker opens PDF, converts all pages, OCRs all pages, returns results
+- Coarse-grained: ~30K PDFs / N workers
+- Each worker runs serially through pages within one PDF
 
----
+**Alternative: Page-Level Parallelism**
 
-## Technology Stack Summary
+```python
+# Generate page tasks: (pdf_path, page_num) tuples
+page_tasks = []
+for pdf_path in pdf_paths:
+    doc = pymupdf.open(pdf_path)
+    page_tasks.extend((pdf_path, i) for i in range(len(doc)))
+    doc.close()
 
-| Component | Technology | Version | Purpose | Notes |
-|-----------|-----------|---------|---------|-------|
-| **Signal Handling** | `signal` module | stdlib | SIGINT handler for graceful shutdown | Windows: SIGINT only, no SIGTERM |
-| **IPC for Shutdown** | `multiprocessing.Event` | stdlib | Cross-platform shutdown coordination | Shared between parent and workers |
-| **Interactive Menu** | `input()` | stdlib | Simple text-based menu (no curses) | Platform-agnostic, zero dependencies |
-| **Campaign State** | JSON (stdlib `json`) | stdlib | Persistent campaign metadata | Separate from `.checkpoint.json` |
-| **Folder Stats** | `collections.defaultdict` | stdlib | Aggregate results by folder | Post-processing step |
-| **Report Generation** | Markdown (string formatting) | stdlib | Human-readable campaign summary | `campaign_report.md` |
+# Dispatch pages to workers
+with multiprocessing.Pool(processes=num_workers) as pool:
+    page_results = pool.map(process_page, page_tasks)
+```
 
-**Key decisions:**
-- **No new dependencies:** All campaign features use stdlib only
-- **Minimal pipeline changes:** Core OCR logic unchanged, campaign wraps it
-- **Cross-platform:** Windows-compatible signal handling and menu system
+**Tradeoffs:**
 
----
+| Aspect | Document-Level (Current) | Page-Level |
+|--------|--------------------------|------------|
+| **Granularity** | ~30K tasks (~30K PDFs) | ~100K+ tasks (multi-page PDFs) |
+| **Load Balancing** | Uneven (PDFs vary: 1-50 pages) | Even (each task = 1 page) |
+| **Startup Overhead** | Open PDF once per document | Open PDF once per page (higher overhead) |
+| **Memory** | PDF handle held during all pages | PDF handle held per page (lower peak) |
+| **Checkpoint Complexity** | Per-PDF atomic checkpoints | Per-page checkpoints or aggregation required |
+| **Windows Spawn Cost** | N processes (reused via Pool) | N processes (reused), but more task pickling |
+| **Code Changes** | Current codebase | Significant refactor |
 
-## Testing Strategy by Phase
+**Analysis:**
 
-### Phase 1: Enhanced Campaign State
+**Current document-level model is appropriate because:**
+1. **Checkpoint architecture**: Existing atomic checkpoint writes are per-PDF; page-level would require aggregation or per-page checkpoints (state explosion)
+2. **Load balancing**: 30K PDFs provides sufficient granularity for 20 cores (1,500 PDFs/core)
+3. **PDF handle overhead**: Opening PDF for each page instead of once per document = wasted I/O
+4. **Diminishing returns**: PyMuPDF swap and config optimization address per-page latency; parallelism grain unlikely to be bottleneck
 
-**Unit tests:**
-- `test_load_or_create_campaign_state()`: New campaign vs. resume
-- `test_update_campaign_state()`: Atomic updates, folder stats persistence
-- `test_folder_path_injection()`: Verify `process_single_pdf_wrapper()` adds folder field
+**When to reconsider page-level:**
+- If profiling shows workers idle due to load imbalance (few large PDFs dominate tail latency)
+- If checkpoint architecture changes (e.g., streaming results instead of per-PDF batches)
 
-**Integration test:**
-- Run pipeline with nested directories, verify `campaign_state.json` includes correct folder paths
+**Hybrid Approach (Future Consideration):**
 
-**Success metric:** Campaign state loads correctly on resume, folder paths accurate
+```python
+# Page-level parallelism within each worker process
+def process_pdf(pdf_path):
+    doc = pymupdf.open(pdf_path)
+    with ThreadPoolExecutor(max_workers=4) as thread_pool:
+        page_results = thread_pool.map(ocr_page, [doc[i] for i in range(len(doc))])
+    # Aggregate page results → per-PDF checkpoint
+    return aggregate_results(page_results)
+```
 
----
+**Hybrid Tradeoffs:**
+- **Benefit**: Parallelize OCR within one PDF (if PDFs have many pages)
+- **Limitation**: OCR is CPU-bound, not I/O-bound. Python's GIL blocks true threading parallelism
+- **Alternative**: Use `multiprocessing.Pool` within worker (nested pools), but complexity high
+- **Verdict**: Not recommended unless profiling shows single-PDF processing is bottleneck
 
-### Phase 2: Interactive Menu
+**Recommendation:**
 
-**Manual testing required** (menu is interactive):
-- Checkpoint exists: Menu displays with resume option
-- No checkpoint: Menu offers fresh start only
-- Stats view: Displays per-folder table correctly
-- Re-run failures: Filters to error files only
+**Maintain document-level parallelism:**
+- Existing architecture is sound for 30K+ PDF corpus
+- Optimization effort better spent on per-page latency (PyMuPDF, config, rotation)
+- Checkpoint and testing architecture built around per-PDF granularity
 
-**Unit tests:**
-- `test_display_campaign_menu()`: Mock `input()`, verify action returns
-- `test_display_folder_stats()`: Verify output formatting
+**Defer page-level parallelism** unless:
+- Profiling reveals load imbalance as primary bottleneck
+- Corpus characteristics change (e.g., few very large PDFs instead of many small ones)
 
-**Success metric:** Menu works end-to-end, actions dispatch correctly
-
----
-
-### Phase 3: Graceful Shutdown
-
-**Manual testing required:**
-- Start large batch (1000+ files), press Ctrl+C after ~100 files processed
-- Verify: "Finishing current files..." message appears
-- Verify: Pipeline stops within ~10 seconds (time to finish in-flight files)
-- Verify: Checkpoint saved with correct `processed_files` count
-- Verify: Campaign state marked `interrupted`
-- Resume: Next run shows menu with continue option
-
-**Stress test:**
-- Press Ctrl+C twice quickly (forceful shutdown)
-- Verify: Checkpoint still saved (exception handler)
-- Verify: No zombie processes on Windows
-
-**Unit tests:**
-- `test_signal_handler()`: Mock shutdown event, verify event.set() called
-- `test_shutdown_event_check()`: Verify loop breaks when event is set
-
-**Success metric:** Ctrl+C stops gracefully, checkpoints preserved, resume works
-
----
-
-### Phase 4: Per-Folder Statistics
-
-**Unit tests:**
-- `test_aggregate_per_folder_stats()`: Verify grouping and aggregation logic
-- `test_write_campaign_report()`: Verify Markdown formatting
-
-**Integration test:**
-- Run pipeline on nested directory structure (3+ levels)
-- Verify folder stats in `campaign_state.json` match actual results
-- Verify `campaign_report.md` highlights problem areas correctly
-
-**Success metric:** Folder stats accurate, report identifies low-performing folders
+**Confidence:** HIGH — PyMuPDF multiprocessing docs, Python multiprocessing best practices, corpus characteristics (30K PDFs)
 
 ---
 
-## Sources
+## Suggested Build Order: Incremental Gains
 
-### Signal Handling and Graceful Shutdown
-- [Handling SIGINT in multiprocessing on Windows - Python Help](https://discuss.python.org/t/handling-sigint-in-multiprocessing-on-windows/90064)
-- [Graceful exit with Python multiprocessing | The-Fonz blog](https://the-fonz.gitlab.io/posts/python-multiprocessing/)
-- [Signal handling with async multiprocesses in Python — how to gracefully shut down | by Cziegler | Medium](https://medium.com/@cziegler_99189/gracefully-shutting-down-async-multiprocesses-in-python-2223be384510)
-- [GitHub - wbenny/python-graceful-shutdown](https://github.com/wbenny/python-graceful-shutdown)
-- [Shutdown the Multiprocessing Pool in Python – SuperFastPython](https://superfastpython.com/shutdown-the-multiprocessing-pool-in-python/)
-- [Graceful vs. Forceful: Mastering Python's Pool Termination](https://runebook.dev/en/docs/python/library/multiprocessing/multiprocessing.pool.Pool.terminate)
-- [Python Multiprocessing graceful shutdown in the proper order | peterspython.com](https://www.peterspython.com/en/blog/python-multiprocessing-graceful-shutdown-in-the-proper-order)
+Performance optimization should follow incremental, measurable steps to maximize early wins and minimize integration risk. The recommended sequence prioritizes high-impact, low-risk changes first.
 
-### Interactive CLI Menus
-- [pymenu-cli · PyPI](https://pypi.org/project/pymenu-cli/)
-- [Interactive CLI select menu in Python · GitHub](https://gist.github.com/henryefranks/885b95503c519f70f5b701681eb8d97f)
-- [GitHub - mtik00/pyclimenu: Menu system for Python interactive command-line scripts](https://github.com/mtik00/pyclimenu)
+### Phase 1: PDF Rendering Swap (Highest Impact)
 
-### Checkpoint State and Progress Tracking
-- [Agent State Checkpointing and Resumption · Issue #2172 · openai/openai-agents-python](https://github.com/openai/openai-agents-python/issues/2172)
-- [Persistence - Docs by LangChain](https://docs.langchain.com/oss/python/langgraph/persistence)
-- [State Management and Resumability | gemini-cli-extensions/conductor](https://deepwiki.com/gemini-cli-extensions/conductor/8.2-state-management-and-resumability)
-- [GitHub - a-rahimi/python-checkpointing: Checkpoint python data processing pipelines](https://github.com/a-rahimi/python-checkpointing)
+**What to Build:**
+- Replace `pdf2image.convert_from_path()` with PyMuPDF `doc.get_pixmap(dpi=300)`
+- Adapter function: `get_page_as_pil_image(pdf_path, page_num) -> PIL.Image`
+- Explicit pixmap disposal after PIL conversion
 
-### Directory Statistics and Folder Analysis
-- [Analyzing Your File System and Folder Structures with Python - njanakiev](https://janakiev.com/blog/python-filesystem-analysis/)
-- [GitHub - njanakiev/folderstats: Python module that collects detailed statistics from a folder structure](https://github.com/njanakiev/folderstats)
-- [Build a Python Directory Tree Generator for the Command Line – Real Python](https://realpython.com/directory-tree-generator-python/)
+**Expected Gain:**
+- **3-12× speedup** on PDF rendering per official benchmarks
+- Rendering is per-page operation; affects all 100K+ pages in corpus
+- Largest single bottleneck based on typical OCR pipeline profiles
 
-### Batch Processing Patterns
-- [mcp-cli · PyPI](https://pypi.org/project/mcp-cli/) — Parallel batch execution with checkpointing and resume
-- [Efficient Data Processing in Python: Batch vs Streaming Pipelines Explained](https://www.freecodecamp.org/news/efficient-data-processing-in-python-batch-vs-streaming-pipelines/)
+**Risk Level:** LOW
+- PyMuPDF API is well-documented and stable
+- PIL Image interface maintained downstream (no OCR code changes)
+- Existing test suite validates correctness (230 tests)
+
+**Testing Strategy:**
+- Run on small test corpus (10-20 PDFs) before full campaign
+- Compare output CSV/JSON checksums (should be identical)
+- Profile with `cProfile` to measure rendering time reduction
+
+**Success Criteria:**
+- All 230 tests pass
+- Output identical to pdf2image baseline (bitwise CSV/JSON comparison)
+- Measured speedup: 2× or better on PDF rendering
+
+**Dependencies:** None (first optimization)
 
 ---
 
-*Architecture research for: Campaign management integration with existing OCR pipeline*
-*Researched: 2026-06-05*
-*Confidence: HIGH (signal handling, menu patterns, folder stats) — all based on stdlib features and documented multiprocessing patterns*
+### Phase 2: Tesseract Configuration (Immediate Benefit, Zero Risk)
+
+**What to Build:**
+- Add `custom_config = r'--psm 6 --oem 1 -c tessedit_char_whitelist=0123456789'`
+- Inject config into `pytesseract.image_to_string(image, config=custom_config)`
+- Apply to both multi-rotation OCR and preprocessing fallback
+
+**Expected Gain:**
+- **10-30% speedup** on OCR per character (digit-only reduces search space)
+- **Accuracy improvement**: Fewer false positives (O→0, I→1 eliminated)
+- May reduce preprocessing fallback invocations if cleaner OCR output
+
+**Risk Level:** ZERO
+- Config string is optional parameter; wrong config = fallback to defaults
+- Regex validation (`\d{5}`) unchanged; bad OCR results rejected as before
+- Reversible: remove config string to revert
+
+**Testing Strategy:**
+- Run test corpus with config enabled
+- Compare accuracy metrics (OCR success rate, preprocessing fallback rate)
+- Verify output still passes regex validation
+
+**Success Criteria:**
+- OCR accuracy ≥ baseline (94.9%)
+- Preprocessing fallback rate ≤ baseline (should decrease)
+- No test failures
+
+**Dependencies:** None (can apply independently or after Phase 1)
+
+**Recommended Timing:** Apply immediately after Phase 1 validated (compound speedups)
+
+---
+
+### Phase 3: Profiling and Bottleneck Identification (Data-Driven)
+
+**What to Build:**
+- Integrate `cProfile` into main pipeline: `python -m cProfile -o profile.stats precede_ocr.py <args>`
+- Visualize with SnakeViz: `snakeviz profile.stats`
+- Instrument timing logs for key operations (PDF open, rendering, OCR per rotation, preprocessing)
+
+**Expected Gain:**
+- **Identify actual bottlenecks** rather than assumed bottlenecks
+- Validate Phase 1 & 2 gains with hard numbers
+- Guide Phase 4 priorities (rotation strategy, other optimizations)
+
+**Risk Level:** ZERO (profiling doesn't change code behavior)
+
+**Testing Strategy:**
+- Profile on representative subset (1,000-5,000 PDFs)
+- Sort by `tottime` to find hottest functions
+- Compare profile before/after Phase 1 & 2 optimizations
+
+**Success Criteria:**
+- Profile data shows PDF rendering time reduced (Phase 1 validation)
+- Profile data shows OCR time per page reduced (Phase 2 validation)
+- New bottleneck identified (guides Phase 4+)
+
+**Dependencies:** Phases 1 & 2 completed (need optimized baseline to profile)
+
+---
+
+### Phase 4: Rotation Strategy Refinement (Data-Informed)
+
+**What to Build:**
+- Analyze campaign_state.json rotation distribution
+- If 90° dominates (>60%), reorder rotations: `[90, 270, 0, 180]` → most-common-first
+- Dynamic rotation ordering based on per-folder stats (optional advanced)
+
+**Expected Gain:**
+- **20-40% reduction** in OCR passes if one rotation dominates
+- Best case: avg passes 2.5 → 1.5 (if 90° is 70% of corpus)
+- No gain if rotation distribution is uniform (25% each)
+
+**Risk Level:** LOW
+- Simple list reordering; logic unchanged
+- Regex validation still guarantees correctness
+
+**Testing Strategy:**
+- Measure rotation distribution from existing campaign data
+- Calculate expected pass reduction
+- Benchmark small corpus before/after
+
+**Success Criteria:**
+- If rotation distribution skewed: measurable pass reduction
+- If rotation distribution uniform: defer optimization (no benefit)
+
+**Dependencies:** Phase 3 profiling (validate rotation loop is still bottleneck post-PyMuPDF)
+
+**Conditional Trigger:** Only apply if profiling shows rotation loop is significant post-PyMuPDF
+
+---
+
+### Phase 5: Advanced Optimizations (If Needed)
+
+**Candidates Based on Profiling Results:**
+
+**5a. DPI Reduction Experiment**
+- Test 200 DPI vs 300 DPI on sample corpus
+- If accuracy ≥ baseline, adopt 200 DPI (faster rendering + OCR)
+- Risk: Accuracy degradation on low-quality scans
+
+**5b. Preprocessing Pipeline Optimization**
+- Profile OpenCV preprocessing steps (grayscale, threshold, denoise)
+- Identify slowest operations (e.g., bilateral filter vs Gaussian blur)
+- Test minimal preprocessing that maintains accuracy
+
+**5c. Hybrid CPU/GPU Tesseract**
+- Investigate Tesseract GPU support (if available on Windows)
+- Likely not applicable (Tesseract 5.x is CPU-focused)
+
+**5d. Page-Level Parallelism**
+- Only if profiling shows load imbalance (worker idle time)
+- Major refactor; defer until other optimizations exhausted
+
+**Dependencies:** Phases 1-4 completed, profiling shows new bottleneck
+
+---
+
+## Integration Patterns Summary
+
+### New vs Modified Components
+
+| Component | Type | Change |
+|-----------|------|--------|
+| PDF page extraction function | MODIFIED | Replace pdf2image calls with PyMuPDF |
+| PyMuPDF → PIL adapter | NEW | Convert pixmap to PIL Image for pytesseract |
+| Multi-rotation OCR function | MODIFIED | Add Tesseract config parameter |
+| Preprocessing fallback OCR | MODIFIED | Add Tesseract config parameter |
+| Rotation frequency analyzer | NEW | Read campaign stats, return ordered rotation list |
+| Profiling instrumentation | NEW | cProfile integration, timing logs |
+| Worker process logic | MINIMAL | Import changes only (pymupdf vs pdf2image) |
+| Checkpoint architecture | UNCHANGED | Same per-PDF atomic writes |
+| Campaign state schema | UNCHANGED | Rotation stats already tracked |
+
+### Data Flow Changes
+
+**Phase 1 (PyMuPDF):**
+```
+BEFORE: PDF → convert_from_path() → List[PIL.Image] → OCR
+AFTER:  PDF → doc[page] → get_pixmap() → PIL.frombytes() → OCR (same downstream)
+```
+
+**Phase 2 (Config):**
+```
+BEFORE: PIL.Image → pytesseract.image_to_string() → text
+AFTER:  PIL.Image → pytesseract.image_to_string(config=custom_config) → text (same output format)
+```
+
+**Phase 4 (Rotation):**
+```
+BEFORE: for angle in [90, 270, 0, 180]: ...
+AFTER:  for angle in rotation_order_from_stats(): ... (same loop structure)
+```
+
+### Backward Compatibility
+
+All optimizations maintain existing interfaces:
+- OCR functions still accept PIL Images
+- Output format unchanged (CSV + JSON schema)
+- Checkpoint format unchanged (JSON structure)
+- Test suite unchanged (validates behavior, not implementation)
+
+---
+
+## Performance Expectations
+
+### Baseline (Current)
+
+| Operation | Time per Page (est.) | Notes |
+|-----------|----------------------|-------|
+| PDF rendering (pdf2image) | 1-2s | Poppler pdftoppm |
+| OCR per rotation | 0.5-1s | Tesseract, 300 DPI |
+| Multi-rotation (avg 2.5 passes) | 1.25-2.5s | Brute-force 4 rotations |
+| Preprocessing fallback | +2-3s | OpenCV pipeline + retry |
+| **Total per page** | ~3-5s | Assumes no preprocessing |
+
+**Total corpus estimate:**
+- 30K PDFs × 5 pages avg × 4s/page = 600K seconds = ~167 hours = ~7 days (single-threaded)
+- With 20 workers: ~8-10 hours (current performance)
+
+### Post-Optimization (Projected)
+
+| Operation | Time per Page (est.) | Improvement |
+|-----------|----------------------|-------------|
+| PDF rendering (PyMuPDF) | 0.2-0.5s | **4-10× faster** |
+| OCR per rotation (digit whitelist) | 0.4-0.8s | **20% faster** |
+| Multi-rotation (frequency-ordered, avg 1.5 passes) | 0.6-1.2s | **40% fewer passes** |
+| Preprocessing fallback | +1.5-2s | Same or slightly faster |
+| **Total per page** | ~1-2s | **2-5× speedup** |
+
+**Optimized corpus estimate:**
+- 30K PDFs × 5 pages avg × 1.5s/page = 225K seconds = ~62 hours = ~2.5 days (single-threaded)
+- With 20 workers: **3-4 hours** (optimized performance)
+
+**Net Gain: 50-70% reduction in total runtime** (8-10 hours → 3-4 hours)
+
+**Confidence:** MEDIUM — Based on published benchmarks (PyMuPDF, Tesseract config), actual gains depend on corpus characteristics
+
+---
+
+## Risk Assessment
+
+| Optimization | Risk Level | Mitigation |
+|--------------|------------|------------|
+| PyMuPDF swap | LOW | Extensive testing, PIL interface maintained, existing test suite validates correctness |
+| Tesseract config | ZERO | Optional parameter; reversible; regex validation unchanged |
+| Rotation ordering | LOW | Simple reordering; regex validation guarantees correctness |
+| Page-level parallelism | HIGH | Defer until profiling proves necessary; requires checkpoint refactor |
+| DPI reduction | MEDIUM | Test accuracy on sample corpus first; may degrade low-quality scan results |
+
+**Overall Risk:** LOW — Incremental approach with testing at each phase minimizes integration risk
+
+---
+
+## Open Questions for Implementation
+
+1. **PyMuPDF Pixmap Disposal:** Does Python garbage collection suffice, or explicit `pix = None` required?
+2. **Rotation Distribution:** What is actual rotation distribution in 30K corpus? (Analyze campaign_state.json)
+3. **DPI Sweet Spot:** Is 300 DPI necessary for 5-digit IDs, or can 200 DPI maintain accuracy? (Experiment needed)
+4. **Preprocessing Trigger Rate:** What % of pages require preprocessing fallback? (Profile to quantify)
+5. **Worker Pool Size:** Is `cpu_count() - 1` optimal for hybrid CPU (P-cores + E-cores)? (Experiment with pool sizes)
+
+---
+
+## Dependencies and Constraints
+
+### System Requirements
+
+- **Windows 10**: All optimizations tested on Windows spawn model
+- **Python 3.8+**: PyMuPDF and pytesseract compatibility
+- **Tesseract 5.x**: Config parameters assume modern Tesseract
+- **20 CPU cores**: Performance projections assume high core count
+
+### External Dependencies
+
+| Library | Current Version | Optimized Version | Notes |
+|---------|-----------------|-------------------|-------|
+| pdf2image | 1.17.0 | REMOVE | Replace with PyMuPDF |
+| Poppler | Latest | REMOVE | No longer needed |
+| PyMuPDF | N/A | 1.24.0+ | New dependency; use `dpi=` parameter (v1.19.2+) |
+| pytesseract | 0.3.13 | 0.3.13 (same) | No version change needed |
+| Pillow | 12.2.0 | 12.2.0 (same) | Still needed for image handling |
+| OpenCV | 4.13.0.92 | 4.13.0.92 (same) | Preprocessing unchanged |
+
+**Installation:**
+```bash
+pip uninstall pdf2image  # Remove old dependency
+pip install PyMuPDF>=1.24.0  # Add new dependency
+# Poppler binaries no longer needed (can uninstall from system)
+```
+
+---
+
+## Testing Strategy
+
+### Phase-Specific Testing
+
+**Phase 1 (PyMuPDF):**
+1. Unit tests: Verify `get_page_as_pil_image()` returns valid PIL Image
+2. Integration tests: Run full pipeline on 10-20 test PDFs
+3. Regression tests: Compare output CSV/JSON to pdf2image baseline (bitwise identical)
+4. Performance tests: Profile PDF rendering time (expect 2-10× speedup)
+
+**Phase 2 (Config):**
+1. Unit tests: Verify config string accepted by pytesseract
+2. Integration tests: Run on test corpus, measure accuracy
+3. Regression tests: OCR accuracy ≥ baseline (94.9%)
+4. Performance tests: Measure OCR time reduction per rotation
+
+**Phase 3 (Profiling):**
+1. Generate cProfile output for representative corpus
+2. Visualize with SnakeViz, identify top 5 hotspots
+3. Validate Phase 1 & 2 gains in profile data
+4. Document new bottlenecks for Phase 4+
+
+**Phase 4 (Rotation):**
+1. Analyze campaign_state.json rotation distribution
+2. Unit test rotation ordering function
+3. Integration test on sample corpus
+4. Performance test: measure OCR pass reduction
+
+### Regression Prevention
+
+- **Golden corpus**: Define 50-100 representative PDFs as test set
+- **Output checksums**: SHA-256 of CSV + JSON for baseline comparison
+- **Accuracy metrics**: Track OCR success rate, preprocessing fallback rate
+- **Performance benchmarks**: Track per-page timings (PDF open, render, OCR)
+
+**Existing Test Coverage:** 230 tests validate pipeline correctness; no changes required for optimization (behavior unchanged)
+
+---
+
+## Monitoring and Validation
+
+### Profiling Tools
+
+| Tool | Purpose | When to Use |
+|------|---------|-------------|
+| **cProfile** | Full-program profiling, function call times | Every phase; baseline and optimized |
+| **SnakeViz** | Visualize cProfile output (flame graphs) | Bottleneck identification |
+| **py-spy** | Sampling profiler (production, no code changes) | Production monitoring (if needed) |
+| **time.perf_counter()** | Manual timing instrumentation | Per-operation benchmarks |
+
+### Key Metrics
+
+| Metric | Baseline | Target | How to Measure |
+|--------|----------|--------|----------------|
+| PDF rendering time | 1-2s/page | 0.2-0.5s/page | cProfile or manual timing |
+| OCR time per rotation | 0.5-1s | 0.4-0.8s | Manual timing in OCR function |
+| Avg OCR passes per page | 2.5 | 1.5 | Campaign stats |
+| Preprocessing fallback rate | % of pages | ≤ baseline | Campaign stats |
+| Total corpus time (20 workers) | 8-10 hours | 3-4 hours | Wall-clock time |
+
+### Success Criteria
+
+**Phase 1:** 2× speedup on PDF rendering, output identical
+**Phase 2:** OCR accuracy ≥ baseline, 10-30% OCR speedup
+**Phase 3:** Bottlenecks identified, optimization priorities data-driven
+**Phase 4:** OCR pass reduction if rotation distribution skewed
+**Overall:** 50-70% total runtime reduction (8-10 hours → 3-4 hours)
+
+---
+
+## References and Sources
+
+### Official Documentation
+
+- [PyMuPDF Documentation](https://pymupdf.readthedocs.io/)
+- [PyMuPDF Multiprocessing Recipes](https://pymupdf.readthedocs.io/en/latest/recipes-multiprocessing.html)
+- [PyMuPDF Pixmap Documentation](https://pymupdf.readthedocs.io/en/latest/pixmap.html)
+- [pytesseract PyPI](https://pypi.org/project/pytesseract/)
+- [Tesseract Documentation](https://tesseract-ocr.github.io/tessdoc/)
+- [Python multiprocessing Documentation](https://docs.python.org/3/library/multiprocessing.html)
+
+### Performance Benchmarks and Comparisons
+
+- [PyMuPDF vs pdfplumber 2026 Comparison](https://pdfmux.com/blog/pymupdf-vs-pdfplumber/)
+- [Battle of the PDF Titans: PyMuPDF, pdf2image, Textract](https://openwebtech.com/battle-of-the-pdf-titans-apache-tika-pymupdf-pdfplumber-pdf2image-and-textract/)
+- [piptrends: pymupdf vs pdf2image](https://piptrends.com/compare/pymupdf-vs-pdf2image)
+- [PyMuPDF Performance Comparison Methodology](https://pymupdf.readthedocs.io/en/latest/app4.html)
+
+### Tesseract Optimization Guides
+
+- [Whitelisting and Blacklisting Characters with Tesseract - PyImageSearch](https://pyimagesearch.com/2021/09/06/whitelisting-and-blacklisting-characters-with-tesseract-and-python/)
+- [Tesseract Page Segmentation Modes Explained - PyImageSearch](https://pyimagesearch.com/2021/11/15/tesseract-page-segmentation-modes-psms-explained-how-to-improve-your-ocr-accuracy/)
+- [Tuning Tesseract PSM and OEM](https://sqlpey.com/python/tesseract-psm-oem-tuning/)
+- [Improve Accuracy by Tuning PSM Values - Part 1](https://www.cloudthat.com/resources/blog/improve-accuracy-by-tuning-psm-values-of-tesseract-part-1)
+- [Improve Accuracy by Tuning PSM Values - Part 2](https://www.cloudthat.com/resources/blog/improve-accuracy-by-tuning-psm-values-of-tesseract-part-2)
+
+### Multiprocessing Best Practices
+
+- [Python Multiprocessing: Start Methods, Pools, and Communication](https://dev.to/imsushant12/python-multiprocessing-start-methods-pools-and-communication-4o6d)
+- [Fork vs Spawn in Python Multiprocessing](https://britishgeologicalsurvey.github.io/science/python-forking-vs-spawn/)
+- [Configure the Multiprocessing Pool Context](https://superfastpython.com/multiprocessing-pool-context/)
+- [Multiprocessing Start Methods](https://superfastpython.com/multiprocessing-start-method/)
+
+### Profiling and Optimization
+
+- [Profiling Python Code with cProfile and SnakeViz](https://johal.in/profiling-python-code-hotspots-using-cprofile-and-snakeviz-for-bottleneck-identification/)
+- [cProfile Flame Graphs for Performance Analysis](https://johal.in/cprofile-flame-graphs-python-visualization-for-performance-bottleneck-analysis/)
+- [9 Levels of Profiling Python Apps in 2026](https://medium.com/techtofreedom/9-levels-of-profiling-python-apps-in-2026-from-cprofile-to-tachyon-36024bdb36c6)
+- [OCR Best Practices in 2026: Production-Ready Pipelines](https://preocr.io/blog/ocr-best-practices-in-2026-how-to-build-a-production-ready-ocr-pipeline)
+- [Software Performance Optimization Guide 2026](https://sedai.io/blog/software-performance-optimization-expert-guide)
+
+### Known Issues and Community Discussions
+
+- [Tesseract Issue #4426: Poor Rotation/Layout Detection](https://github.com/tesseract-ocr/tesseract/issues/4426)
+- [PyMuPDF Discussion #1307: PDF to Image at 300 DPI](https://github.com/pymupdf/PyMuPDF/discussions/1307)
+- [PyMuPDF Discussion #913: Matching PyMuPDF Output to pdf2image](https://github.com/pymupdf/PyMuPDF/discussions/913)
+
+### Research Papers
+
+- [Parallel Architectures for Large-Scale Document Processing](https://www.researchgate.net/publication/399889491_Parallel_Architectures_for_Large_-_Scale_Document_ProcessingIntegrating_OCR_and_RAG_Pipelines) (2026)
+
+---
+
+## Confidence Assessment
+
+| Topic | Confidence | Rationale |
+|-------|------------|-----------|
+| **PyMuPDF API** | HIGH | Official docs, multiple benchmarks, GitHub discussions with code examples |
+| **PyMuPDF Performance** | HIGH | Multiple independent benchmarks (3-12× faster), verified across sources |
+| **Tesseract Config** | HIGH | Official Tesseract docs, pytesseract docs, PyImageSearch tutorials |
+| **PSM/OEM Modes** | HIGH | Official Tesseract docs, community best practices, tested patterns |
+| **OSD Reliability** | HIGH | GitHub issue tracking (#4426), community consensus, project decision rationale |
+| **Rotation Strategy** | MEDIUM | Logic sound, but gain depends on corpus rotation distribution (unknown) |
+| **Performance Projections** | MEDIUM | Based on published benchmarks; actual gains depend on corpus characteristics |
+| **Page-Level Parallelism** | MEDIUM | Architecture patterns documented, but tradeoff analysis corpus-specific |
+| **Hybrid CPU Optimization** | LOW | Windows spawn model documented, but hybrid CPU tuning requires experimentation |
+
+**Overall Confidence:** HIGH — Integration patterns well-researched, optimizations follow industry best practices, incremental approach minimizes risk.
