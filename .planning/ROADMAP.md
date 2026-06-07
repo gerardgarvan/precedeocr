@@ -76,9 +76,11 @@ Plans:
 4. User can select "Export partial" and CSV/JSON files are generated from current checkpoint mid-campaign
 5. User can select "Fresh start" and all prior checkpoint/campaign state is cleared for new run
 
-**Plans**: TBD
+**Plans:** 2 plans
 
-**UI hint**: yes
+Plans:
+- [ ] 08-01-PLAN.md -- Menu display, input validation, handler dispatch, view stats, export partial, quit + unit tests
+- [ ] 08-02-PLAN.md -- Re-run failures, fresh start, continue handlers + main() integration + integration tests
 
 ---
 
@@ -106,7 +108,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 6. Enhanced Campaign State Schema | 3/3 | Complete | 2026-06-06 |
 | 7. Graceful Shutdown Infrastructure | 0/2 | Planned | - |
-| 8. Interactive Campaign Menu | 0/0 | Not started | - |
+| 8. Interactive Campaign Menu | 0/2 | Planned | - |
 | 9. Per-Folder Statistics & Reporting | 0/0 | Not started | - |
 
 ---
@@ -122,4 +124,4 @@ Plans:
 **Research**: All phases have sufficient documentation in research/SUMMARY.md. No phases require `/gsd:research-phase`.
 
 ---
-*Last updated: 2026-06-06*
+*Last updated: 2026-06-07*
