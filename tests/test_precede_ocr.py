@@ -43,6 +43,12 @@ try:
     from precede_ocr import categorize_errors
 except ImportError:
     categorize_errors = None
+
+try:
+    from precede_ocr import generate_campaign_report
+except ImportError:
+    generate_campaign_report = None
+
 import time as time_module
 import re
 from dataclasses import asdict
@@ -3013,3 +3019,264 @@ class TestPreprocessingRotationStats:
         source = inspect.getsource(process_all_pdfs)
         assert "preprocessing_fallbacks" in source
         assert "preprocessed" in source
+
+
+class TestCampaignReportGeneration:
+    """Tests for generate_campaign_report() per STAT-04/STAT-05."""
+
+    def test_creates_report_file(self, tmp_path):
+        campaign_state = CampaignState(
+            campaign_id='campaign_20260607_120000',
+            input_path='/test/input',
+            status='completed',
+            started_at='2026-06-07T12:00:00',
+            completed_at='2026-06-07T12:30:00',
+            files_processed=5,
+            files_failed=1,
+            total_files_discovered=5,
+            folder_stats={
+                'subdir_a': {
+                    'files': ['a1.pdf', 'a2.pdf', 'a3.pdf'],
+                    'failed_files': [],
+                    'total_pages': 15,
+                    'ids_found': 12,
+                    'no_id_pages': 3,
+                    'rotations': {90: 10, 270: 3, 0: 2},
+                    'preprocessing_fallbacks': 1
+                },
+                'subdir_b': {
+                    'files': ['b1.pdf', 'b2.pdf'],
+                    'failed_files': ['b2.pdf'],
+                    'total_pages': 5,
+                    'ids_found': 2,
+                    'no_id_pages': 1,
+                    'rotations': {90: 3},
+                    'preprocessing_fallbacks': 4
+                }
+            }
+        )
+        results = [
+            {'filename': 'a1.pdf', 'page': 1, 'ids': ['12345'], 'notes': '', 'rotation_detected': 90},
+            {'filename': 'a1.pdf', 'page': 2, 'ids': ['12346'], 'notes': '', 'rotation_detected': 90},
+            {'filename': 'a2.pdf', 'page': 1, 'ids': ['22222'], 'notes': 'preprocessed', 'rotation_detected': 270},
+            {'filename': 'b1.pdf', 'page': 1, 'ids': ['33333'], 'notes': '', 'rotation_detected': 90},
+            {'filename': 'b2.pdf', 'page': 0, 'ids': [], 'notes': 'error: FileNotFoundError: not found', 'rotation_detected': None},
+        ]
+
+        generate_campaign_report(campaign_state, results, tmp_path)
+
+        report_path = tmp_path / 'campaign_report.md'
+        assert report_path.exists()
+        content = report_path.read_text(encoding='utf-8')
+        assert '# Campaign Report: campaign_20260607_120000' in content
+
+    def test_report_has_executive_summary(self, tmp_path):
+        campaign_state = CampaignState(
+            campaign_id='test_campaign',
+            input_path='/input',
+            status='completed',
+            started_at='2026-06-07T12:00:00',
+            completed_at='2026-06-07T12:05:00',
+            folder_stats={
+                'dir1': {
+                    'files': ['f1.pdf'],
+                    'failed_files': [],
+                    'total_pages': 3,
+                    'ids_found': 2,
+                    'no_id_pages': 1,
+                    'rotations': {90: 2},
+                    'preprocessing_fallbacks': 0
+                }
+            }
+        )
+        results = [
+            {'filename': 'f1.pdf', 'page': 1, 'ids': ['11111'], 'notes': '', 'rotation_detected': 90},
+            {'filename': 'f1.pdf', 'page': 2, 'ids': ['22222'], 'notes': '', 'rotation_detected': 90},
+            {'filename': 'f1.pdf', 'page': 3, 'ids': [], 'notes': '', 'rotation_detected': None},
+        ]
+
+        generate_campaign_report(campaign_state, results, tmp_path)
+
+        content = (tmp_path / 'campaign_report.md').read_text(encoding='utf-8')
+        assert '## Executive Summary' in content
+        assert '**Total Files**' in content
+        assert '**IDs Found**' in content
+
+    def test_report_highlights_problem_folders(self, tmp_path):
+        """Per D-05/D-07: folders with below 80% success get bold + emoji."""
+        campaign_state = CampaignState(
+            campaign_id='test',
+            input_path='/input',
+            status='completed',
+            started_at='2026-06-07T12:00:00',
+            completed_at='2026-06-07T12:05:00',
+            folder_stats={
+                'problem_dir': {
+                    'files': ['p1.pdf', 'p2.pdf', 'p3.pdf', 'p4.pdf', 'p5.pdf'],
+                    'failed_files': ['p1.pdf', 'p2.pdf'],
+                    'total_pages': 15,
+                    'ids_found': 5,
+                    'no_id_pages': 5,
+                    'rotations': {90: 8},
+                    'preprocessing_fallbacks': 2
+                },
+                'good_dir': {
+                    'files': ['g1.pdf', 'g2.pdf', 'g3.pdf', 'g4.pdf', 'g5.pdf'],
+                    'failed_files': [],
+                    'total_pages': 25,
+                    'ids_found': 20,
+                    'no_id_pages': 5,
+                    'rotations': {90: 15, 270: 5},
+                    'preprocessing_fallbacks': 0
+                }
+            }
+        )
+        results = [
+            {'filename': 'p1.pdf', 'page': 0, 'ids': [], 'notes': 'error: FileNotFoundError: x', 'rotation_detected': None},
+            {'filename': 'g1.pdf', 'page': 1, 'ids': ['12345'], 'notes': '', 'rotation_detected': 90},
+        ]
+
+        generate_campaign_report(campaign_state, results, tmp_path)
+
+        content = (tmp_path / 'campaign_report.md').read_text(encoding='utf-8')
+        # Problem folder highlighted with emoji + bold (D-07)
+        assert '\u26a0\ufe0f **problem_dir**' in content
+        # Good folder NOT highlighted
+        assert '\u26a0\ufe0f **good_dir**' not in content
+
+    def test_report_has_recommendations(self, tmp_path):
+        """Per D-06: pattern-based recommendations for problem folders."""
+        campaign_state = CampaignState(
+            campaign_id='test',
+            input_path='/input',
+            status='completed',
+            started_at='2026-06-07T12:00:00',
+            completed_at='2026-06-07T12:05:00',
+            folder_stats={
+                'bad_scans': {
+                    'files': ['s1.pdf', 's2.pdf', 's3.pdf'],
+                    'failed_files': ['s3.pdf'],
+                    'total_pages': 10,
+                    'ids_found': 3,
+                    'no_id_pages': 2,
+                    'rotations': {90: 5},
+                    'preprocessing_fallbacks': 8  # 8/10 = 80% over 50% threshold
+                }
+            }
+        )
+        results = [
+            {'filename': 's1.pdf', 'page': 1, 'ids': ['11111'], 'notes': 'preprocessed', 'rotation_detected': 90},
+            {'filename': 's3.pdf', 'page': 0, 'ids': [], 'notes': 'error: PDFPageCountError: 0 pages', 'rotation_detected': None},
+        ]
+
+        generate_campaign_report(campaign_state, results, tmp_path)
+
+        content = (tmp_path / 'campaign_report.md').read_text(encoding='utf-8')
+        assert '## Problem Areas & Recommendations' in content
+        assert 'rescanning' in content.lower() or 'rescan' in content.lower()
+
+    def test_report_has_rotation_distribution(self, tmp_path):
+        """Per STAT-05/D-11: rotation distribution shown campaign-wide."""
+        campaign_state = CampaignState(
+            campaign_id='test',
+            input_path='/input',
+            status='completed',
+            started_at='2026-06-07T12:00:00',
+            completed_at='2026-06-07T12:05:00',
+            folder_stats={
+                'dir1': {
+                    'files': ['f1.pdf'],
+                    'failed_files': [],
+                    'total_pages': 4,
+                    'ids_found': 4,
+                    'no_id_pages': 0,
+                    'rotations': {90: 3, 270: 1},
+                    'preprocessing_fallbacks': 0
+                }
+            }
+        )
+        results = [
+            {'filename': 'f1.pdf', 'page': 1, 'ids': ['11111'], 'notes': '', 'rotation_detected': 90},
+            {'filename': 'f1.pdf', 'page': 2, 'ids': ['22222'], 'notes': '', 'rotation_detected': 90},
+            {'filename': 'f1.pdf', 'page': 3, 'ids': ['33333'], 'notes': '', 'rotation_detected': 90},
+            {'filename': 'f1.pdf', 'page': 4, 'ids': ['44444'], 'notes': '', 'rotation_detected': 270},
+        ]
+
+        generate_campaign_report(campaign_state, results, tmp_path)
+
+        content = (tmp_path / 'campaign_report.md').read_text(encoding='utf-8')
+        assert 'Rotation Distribution' in content
+        assert '90' in content
+        assert '270' in content
+
+    def test_report_per_folder_sorted_worst_first(self, tmp_path):
+        """Per D-12: per-folder table sorted by success rate ascending."""
+        campaign_state = CampaignState(
+            campaign_id='test',
+            input_path='/input',
+            status='completed',
+            started_at='2026-06-07T12:00:00',
+            completed_at='2026-06-07T12:05:00',
+            folder_stats={
+                'best_folder': {
+                    'files': ['b1.pdf', 'b2.pdf'],
+                    'failed_files': [],
+                    'total_pages': 10,
+                    'ids_found': 8,
+                    'no_id_pages': 2,
+                    'rotations': {90: 8},
+                    'preprocessing_fallbacks': 0
+                },
+                'worst_folder': {
+                    'files': ['w1.pdf', 'w2.pdf', 'w3.pdf'],
+                    'failed_files': ['w1.pdf', 'w2.pdf'],
+                    'total_pages': 5,
+                    'ids_found': 2,
+                    'no_id_pages': 1,
+                    'rotations': {90: 2},
+                    'preprocessing_fallbacks': 3
+                }
+            }
+        )
+        results = [
+            {'filename': 'b1.pdf', 'page': 1, 'ids': ['12345'], 'notes': '', 'rotation_detected': 90},
+            {'filename': 'w1.pdf', 'page': 0, 'ids': [], 'notes': 'error: FileNotFoundError: x', 'rotation_detected': None},
+        ]
+
+        generate_campaign_report(campaign_state, results, tmp_path)
+
+        content = (tmp_path / 'campaign_report.md').read_text(encoding='utf-8')
+        # worst_folder should appear before best_folder in table
+        worst_pos = content.find('worst_folder')
+        best_pos = content.find('best_folder')
+        assert worst_pos < best_pos
+
+    def test_report_includes_avg_ids_per_page(self, tmp_path):
+        """Per D-13: Avg IDs/Page column in per-folder table."""
+        campaign_state = CampaignState(
+            campaign_id='test',
+            input_path='/input',
+            status='completed',
+            started_at='2026-06-07T12:00:00',
+            completed_at='2026-06-07T12:05:00',
+            folder_stats={
+                'dir1': {
+                    'files': ['f1.pdf'],
+                    'failed_files': [],
+                    'total_pages': 10,
+                    'ids_found': 8,
+                    'no_id_pages': 2,
+                    'rotations': {90: 8},
+                    'preprocessing_fallbacks': 0
+                }
+            }
+        )
+        results = [
+            {'filename': 'f1.pdf', 'page': 1, 'ids': ['12345'], 'notes': '', 'rotation_detected': 90},
+        ]
+
+        generate_campaign_report(campaign_state, results, tmp_path)
+
+        content = (tmp_path / 'campaign_report.md').read_text(encoding='utf-8')
+        assert 'Avg IDs/Page' in content
+        assert '0.80' in content  # 8 ids / 10 pages = 0.80

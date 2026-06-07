@@ -874,6 +874,201 @@ def categorize_errors(results: list[dict]) -> dict[str, int]:
     return dict(error_counter.most_common())
 
 
+def generate_campaign_report(campaign_state: CampaignState,
+                             all_results: list[dict],
+                             output_dir: Path) -> None:
+    """Generate comprehensive Markdown campaign report per D-01 through D-13.
+
+    Per D-04: Auto-generates on every campaign completion, no CLI flag needed.
+    Per D-03: Written to same output directory as CSV/JSON.
+
+    Args:
+        campaign_state: CampaignState with folder_stats populated
+        all_results: All result dicts (checkpointed + new)
+        output_dir: Directory to write campaign_report.md
+    """
+    folder_stats = campaign_state.folder_stats
+
+    # Campaign-wide metrics
+    total_files = len(set(r['filename'] for r in all_results))
+    failed_files = sum(1 for r in all_results if r.get('page') == 0 and 'error:' in r.get('notes', ''))
+    success_rate = ((total_files - failed_files) / total_files * 100) if total_files > 0 else 0.0
+    total_pages = len(all_results)
+    total_ids = sum(len(r['ids']) for r in all_results)
+    no_id_pages = sum(1 for r in all_results if not r['ids'] and r.get('page', 0) > 0 and 'error:' not in r.get('notes', ''))
+
+    # Campaign-wide rotation distribution (STAT-05/D-11)
+    rotation_counts = Counter()
+    for r in all_results:
+        if r.get('rotation_detected') is not None:
+            rotation_counts[r['rotation_detected']] += 1
+    total_rotations = sum(rotation_counts.values())
+
+    def rotation_pct(angle):
+        if total_rotations == 0:
+            return 0.0
+        return rotation_counts.get(angle, 0) / total_rotations * 100
+
+    # Campaign-wide preprocessing fallback rate (STAT-05)
+    total_preprocessing = sum(1 for r in all_results if 'preprocessed' in r.get('notes', ''))
+    preprocessing_rate = (total_preprocessing / total_pages * 100) if total_pages > 0 else 0.0
+
+    # Error categorization for summary
+    error_categories = categorize_errors(all_results)
+    error_section_lines = []
+    if error_categories:
+        error_section_lines.append("| Error Type | Count |")
+        error_section_lines.append("|------------|-------|")
+        for etype, count in error_categories.items():
+            error_section_lines.append(f"| {etype} | {count} |")
+    error_table = '\n'.join(error_section_lines) if error_section_lines else "No errors encountered."
+
+    # Per-folder table (D-01, D-11, D-12, D-13)
+    table_lines = []
+    table_lines.append("| Folder | Files | Success Rate | Failed | Total Pages | IDs Found | Avg IDs/Page | Preproc Fallbacks | Rotations (90/270/0/180) |")
+    table_lines.append("|--------|-------|--------------|--------|-------------|-----------|--------------|-------------------|--------------------------|")
+
+    # Build folder rows for sorting
+    folder_rows = []
+    for folder_path, fs in folder_stats.items():
+        files_list = fs['files'] if isinstance(fs['files'], list) else list(fs.get('files', []))
+        failed_list = fs['failed_files'] if isinstance(fs['failed_files'], list) else list(fs.get('failed_files', []))
+        total_files_folder = len(files_list)
+        failed_files_folder = len(failed_list)
+        success_rate_folder = ((total_files_folder - failed_files_folder) / total_files_folder * 100) if total_files_folder > 0 else 0.0
+        avg_ids = fs['ids_found'] / fs['total_pages'] if fs['total_pages'] > 0 else 0.0
+
+        # Per-folder rotation string (D-11)
+        rotations = fs.get('rotations', {})
+        rot_str = f"{rotations.get(90, rotations.get('90', 0))}/{rotations.get(270, rotations.get('270', 0))}/{rotations.get(0, rotations.get('0', 0))}/{rotations.get(180, rotations.get('180', 0))}"
+
+        folder_rows.append({
+            'folder': folder_path if folder_path else '(root)',
+            'files': total_files_folder,
+            'success_rate': success_rate_folder,
+            'failed': failed_files_folder,
+            'total_pages': fs['total_pages'],
+            'ids_found': fs['ids_found'],
+            'avg_ids': avg_ids,
+            'preprocessing_fallbacks': fs['preprocessing_fallbacks'],
+            'rot_str': rot_str,
+            'no_id_pages': fs['no_id_pages'],
+            'rotations': rotations
+        })
+
+    # D-12: Sort by success rate ascending (worst first)
+    folder_rows.sort(key=lambda x: x['success_rate'])
+
+    for row in folder_rows:
+        folder_display = row['folder']
+        # D-07: Highlight problem folders (D-05: below 80% success)
+        if row['success_rate'] < 80.0:
+            folder_display = f"\u26a0\ufe0f **{row['folder']}**"
+
+        table_lines.append(
+            f"| {folder_display} | {row['files']} | {row['success_rate']:.1f}% | "
+            f"{row['failed']} | {row['total_pages']} | {row['ids_found']} | "
+            f"{row['avg_ids']:.2f} | {row['preprocessing_fallbacks']} | {row['rot_str']} |"
+        )
+
+    table_markdown = '\n'.join(table_lines)
+
+    # Problem areas and recommendations (D-05, D-06)
+    problem_folders = [r for r in folder_rows if r['success_rate'] < 80.0]
+    recommendations = []
+    for pf in problem_folders:
+        folder = pf['folder']
+        # D-06: Pattern-based recommendations
+        if pf['total_pages'] > 0 and pf['preprocessing_fallbacks'] / pf['total_pages'] > 0.5:
+            recommendations.append(
+                f"- **{folder}**: High preprocessing fallback rate "
+                f"({pf['preprocessing_fallbacks']}/{pf['total_pages']} pages). "
+                f"Low scan quality suspected \u2014 consider rescanning source documents."
+            )
+        elif pf['files'] > 0 and pf['failed'] / pf['files'] > 0.3:
+            recommendations.append(
+                f"- **{folder}**: High file-level failure rate "
+                f"({pf['failed']}/{pf['files']} files). "
+                f"Corrupted PDFs suspected \u2014 verify source file integrity."
+            )
+        else:
+            recommendations.append(
+                f"- **{folder}**: Success rate {pf['success_rate']:.1f}%. "
+                f"Review error details in CSV output for specific failure patterns."
+            )
+
+    recommendations_section = '\n'.join(recommendations) if recommendations else "All folders above 80% success threshold. No action required."
+
+    # Build full report (D-01: comprehensive)
+    report = f"""# Campaign Report: {campaign_state.campaign_id}
+
+**Generated:** {datetime.now().isoformat()}
+**Input Path:** {campaign_state.input_path}
+**Status:** {campaign_state.status}
+**Started:** {campaign_state.started_at}
+**Completed:** {campaign_state.completed_at or 'In progress'}
+
+***
+
+## Executive Summary
+
+| Metric | Value |
+|--------|-------|
+| **Total Files** | {total_files} |
+| **Successful** | {total_files - failed_files} ({success_rate:.1f}%) |
+| **Failed** | {failed_files} |
+| **Total Pages Processed** | {total_pages} |
+| **IDs Found** | {total_ids} |
+| **No-ID Pages** | {no_id_pages} |
+| **Preprocessing Fallback Rate** | {preprocessing_rate:.1f}% ({total_preprocessing}/{total_pages} pages) |
+
+### Error Breakdown
+
+{error_table}
+
+### Rotation Distribution (Campaign-Wide)
+
+| Rotation | Count | Percentage |
+|----------|-------|------------|
+| 90deg | {rotation_counts.get(90, 0)} | {rotation_pct(90):.1f}% |
+| 270deg | {rotation_counts.get(270, 0)} | {rotation_pct(270):.1f}% |
+| 0deg | {rotation_counts.get(0, 0)} | {rotation_pct(0):.1f}% |
+| 180deg | {rotation_counts.get(180, 0)} | {rotation_pct(180):.1f}% |
+
+***
+
+## Per-Folder Statistics
+
+{table_markdown}
+
+***
+
+## Problem Areas & Recommendations
+
+**Threshold:** Folders with success rate below 80% are flagged.
+
+{recommendations_section}
+
+***
+
+## Output Files
+
+- **Results CSV:** `precede_results.csv`
+- **Results JSON:** `precede_results.json`
+- **Batch Stats:** `batch_stats.json`
+- **Campaign State:** `campaign_state.json`
+- **This Report:** `campaign_report.md`
+
+***
+
+*Report auto-generated on campaign completion (D-04)*
+"""
+
+    report_path = output_dir / 'campaign_report.md'
+    report_path.write_text(report, encoding='utf-8')
+    print(f"\nCampaign report written to: {report_path}")
+
+
 def validate_sequence(results: list[dict]) -> list[dict]:
     """
     Flag out-of-sequence IDs using Theil-Sen robust regression + MAD outlier detection.
