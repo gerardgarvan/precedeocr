@@ -2235,21 +2235,149 @@ def _make_checkpoint_data(n_results=10, n_failed=2):
     return (results, processed)
 
 
-class TestMenuRedPhase:
-    """Minimal TDD RED tests to verify menu functions exist and work."""
+class TestMenu:
+    """Unit tests for interactive campaign menu (Phase 8, Plan 01)."""
 
     def test_show_menu_valid_input(self, monkeypatch):
+        """show_campaign_menu with valid input "3" returns 3."""
         monkeypatch.setattr('builtins.input', lambda _: "3")
         state = _make_campaign_state()
         cp = _make_checkpoint_data()
         result = show_campaign_menu(state, cp, 200)
         assert result == 3
 
-    def test_handle_quit_returns_quit(self):
-        assert handle_quit() == 'quit'
+    def test_show_menu_invalid_then_valid(self, monkeypatch, capsys):
+        """show_campaign_menu with invalid inputs then valid returns correct choice (D-03)."""
+        inputs = iter(["abc", "99", "3"])
+        monkeypatch.setattr('builtins.input', lambda _: next(inputs))
+        state = _make_campaign_state()
+        cp = _make_checkpoint_data()
+        result = show_campaign_menu(state, cp, 200)
+        assert result == 3
+        output = capsys.readouterr().out
+        assert "Invalid choice. Enter 1-6:" in output
+
+    def test_show_menu_boundary_values(self, monkeypatch):
+        """show_campaign_menu rejects 0 and 7, accepts 1."""
+        inputs = iter(["0", "7", "1"])
+        monkeypatch.setattr('builtins.input', lambda _: next(inputs))
+        state = _make_campaign_state()
+        cp = _make_checkpoint_data()
+        result = show_campaign_menu(state, cp, 200)
+        assert result == 1
+
+    def test_show_menu_keyboard_interrupt(self, monkeypatch):
+        """show_campaign_menu raises SystemExit on KeyboardInterrupt."""
+        def raise_keyboard(_):
+            raise KeyboardInterrupt
+        monkeypatch.setattr('builtins.input', raise_keyboard)
+        state = _make_campaign_state()
+        cp = _make_checkpoint_data()
+        with pytest.raises(SystemExit):
+            show_campaign_menu(state, cp, 200)
+
+    def test_show_menu_eof_error(self, monkeypatch):
+        """show_campaign_menu raises SystemExit on EOFError."""
+        def raise_eof(_):
+            raise EOFError
+        monkeypatch.setattr('builtins.input', raise_eof)
+        state = _make_campaign_state()
+        cp = _make_checkpoint_data()
+        with pytest.raises(SystemExit):
+            show_campaign_menu(state, cp, 200)
+
+    def test_show_menu_displays_status_info(self, monkeypatch, capsys):
+        """show_campaign_menu prints campaign_id, status, progress, failed count (D-01)."""
+        monkeypatch.setattr('builtins.input', lambda _: "6")
+        state = _make_campaign_state()
+        cp = _make_checkpoint_data()
+        show_campaign_menu(state, cp, 200)
+        output = capsys.readouterr().out
+        assert "campaign_20260606_120000" in output
+        assert "interrupted" in output
+        assert "100/200" in output
+        assert "5" in output  # files_failed
+
+    def test_show_menu_100_percent_complete(self, monkeypatch, capsys):
+        """show_campaign_menu with 100% complete shows 'all files processed' (D-10)."""
+        monkeypatch.setattr('builtins.input', lambda _: "6")
+        state = _make_campaign_state(files_processed=200, total_files_discovered=200)
+        # Create checkpoint_data with 200 processed files
+        results = [
+            {'filename': f'file_{i}.pdf', 'page': 1, 'ids': [f'{10000+i}'],
+             'rotation_detected': 90, 'notes': '', 'folder_path': ''}
+            for i in range(200)
+        ]
+        processed = {r['filename'] for r in results}
+        cp = (results, processed)
+        show_campaign_menu(state, cp, 200)
+        output = capsys.readouterr().out
+        assert "all files processed" in output
 
     def test_handle_view_stats_returns_menu(self, capsys):
+        """handle_view_stats prints IDs found and returns 'menu' (D-04)."""
         state = _make_campaign_state()
         cp = _make_checkpoint_data()
         result = handle_view_stats(state, cp)
         assert result == 'menu'
+        output = capsys.readouterr().out
+        assert "IDs found:" in output
+
+    def test_handle_export_partial_writes_and_returns_menu(self, monkeypatch, capsys):
+        """handle_export_partial calls write functions and returns 'menu' (D-11, D-12)."""
+        csv_called = []
+        json_called = []
+
+        def mock_write_csv(results, path):
+            csv_called.append((results, path))
+
+        def mock_write_json(results, path):
+            json_called.append((results, path))
+
+        monkeypatch.setattr('precede_ocr.write_results_csv', mock_write_csv)
+        monkeypatch.setattr('precede_ocr.write_results_json', mock_write_json)
+
+        cp = _make_checkpoint_data()
+        result = handle_export_partial(cp, "output/results.csv", "output/results.json")
+        assert result == 'menu'
+        assert len(csv_called) == 1
+        assert len(json_called) == 1
+        output = capsys.readouterr().out
+        assert "Exported" in output
+
+    def test_handle_export_partial_skips_validation(self, monkeypatch):
+        """handle_export_partial does NOT call validate_sequence (D-13)."""
+        validate_called = []
+
+        def mock_validate(results):
+            validate_called.append(results)
+            return results
+
+        monkeypatch.setattr('precede_ocr.validate_sequence', mock_validate)
+        monkeypatch.setattr('precede_ocr.write_results_csv', lambda r, p: None)
+        monkeypatch.setattr('precede_ocr.write_results_json', lambda r, p: None)
+
+        cp = _make_checkpoint_data()
+        handle_export_partial(cp, "output/results.csv", "output/results.json")
+        assert len(validate_called) == 0, "validate_sequence should NOT be called for partial export"
+
+    def test_handle_quit_returns_quit(self):
+        """handle_quit returns 'quit'."""
+        assert handle_quit() == 'quit'
+
+    def test_menu_loop_stats_then_quit(self, monkeypatch):
+        """run_menu_loop with stats (3) then quit (6) returns 'quit'."""
+        inputs = iter(["3", "6"])
+        monkeypatch.setattr('builtins.input', lambda _: next(inputs))
+        state = _make_campaign_state()
+        cp = _make_checkpoint_data()
+        result = run_menu_loop(state, cp, 200, "output/results.csv", "output/results.json")
+        assert result == 'quit'
+
+    def test_menu_loop_continue_returns_immediately(self, monkeypatch):
+        """run_menu_loop with choice 1 returns 'continue' immediately."""
+        monkeypatch.setattr('builtins.input', lambda _: "1")
+        state = _make_campaign_state()
+        cp = _make_checkpoint_data()
+        result = run_menu_loop(state, cp, 200, "output/results.csv", "output/results.json")
+        assert result == 'continue'
