@@ -58,18 +58,22 @@ None deferred — all identified optimizations included in this milestone.
 
 | REQ-ID | Phase | Status |
 |--------|-------|--------|
-| RENDER-01 | — | Pending |
-| RENDER-02 | — | Pending |
-| TESS-01 | — | Pending |
-| TESS-02 | — | Pending |
-| TESS-03 | — | Pending |
-| TESS-04 | — | Pending |
-| PIPE-01 | — | Pending |
-| PIPE-02 | — | Pending |
-| PIPE-03 | — | Pending |
-| PIPE-04 | — | Pending |
-| QUAL-01 | — | Pending |
-| QUAL-02 | — | Pending |
+| RENDER-01 | Phase 10 | Pending |
+| RENDER-02 | Phase 10 | Pending |
+| TESS-01 | Phase 10 | Pending |
+| TESS-02 | Phase 11 | Pending |
+| TESS-03 | Phase 11 | Pending |
+| TESS-04 | Phase 11 | Pending |
+| PIPE-01 | Phase 10 | Pending |
+| PIPE-02 | Phase 12 | Pending |
+| PIPE-03 | Phase 12 | Pending |
+| PIPE-04 | Phase 12 | Pending |
+| QUAL-01 | Phases 10, 11, 12 | Pending |
+| QUAL-02 | Phases 10, 11, 12 | Pending |
+
+**Coverage:** 12/12 requirements mapped (100%)
+
+**Note:** QUAL-01 and QUAL-02 are embedded quality gates that apply to all phases, not separate phases. Each phase must maintain >=94% accuracy and document benchmarks.
 
 ---
 *Last updated: 2026-06-07*
