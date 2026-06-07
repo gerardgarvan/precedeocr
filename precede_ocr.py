@@ -1069,6 +1069,66 @@ def generate_campaign_report(campaign_state: CampaignState,
     print(f"\nCampaign report written to: {report_path}")
 
 
+def compute_folder_stats_from_results(all_results: list[dict]) -> dict:
+    """Compute folder_stats dict from a list of result dicts.
+
+    Used when process_all_pdfs() was not called (e.g., all files already processed
+    from checkpoint) but we still need folder_stats for report generation.
+
+    Args:
+        all_results: List of result dicts with folder_path field
+
+    Returns:
+        Dict matching campaign_state.folder_stats structure
+    """
+    folder_stats = defaultdict(lambda: {
+        'total_pages': 0,
+        'files': set(),
+        'failed_files': set(),
+        'ids_found': 0,
+        'no_id_pages': 0,
+        'rotations': Counter(),
+        'preprocessing_fallbacks': 0
+    })
+
+    # Group results by filename to identify file-level errors
+    results_by_file = defaultdict(list)
+    for r in all_results:
+        results_by_file[r['filename']].append(r)
+
+    for filename, file_results in results_by_file.items():
+        folder_path = file_results[0].get('folder_path', '')
+        folder_stats[folder_path]['files'].add(filename)
+
+        if file_results[0]['page'] == 0 and 'error:' in file_results[0].get('notes', ''):
+            folder_stats[folder_path]['failed_files'].add(filename)
+
+        for r in file_results:
+            folder_stats[folder_path]['total_pages'] += 1
+            if r['ids']:
+                folder_stats[folder_path]['ids_found'] += len(r['ids'])
+            elif r['page'] > 0 and 'error:' not in r.get('notes', ''):
+                folder_stats[folder_path]['no_id_pages'] += 1
+            if r.get('rotation_detected') is not None:
+                folder_stats[folder_path]['rotations'][r['rotation_detected']] += 1
+            if 'preprocessed' in r.get('notes', ''):
+                folder_stats[folder_path]['preprocessing_fallbacks'] += 1
+
+    # Serialize sets to lists for JSON compatibility
+    return {
+        folder: {
+            'total_pages': fs['total_pages'],
+            'files': list(fs['files']),
+            'failed_files': list(fs['failed_files']),
+            'ids_found': fs['ids_found'],
+            'no_id_pages': fs['no_id_pages'],
+            'rotations': dict(fs['rotations']),
+            'preprocessing_fallbacks': fs['preprocessing_fallbacks']
+        }
+        for folder, fs in folder_stats.items()
+    }
+
+
 def validate_sequence(results: list[dict]) -> list[dict]:
     """
     Flag out-of-sequence IDs using Theil-Sen robust regression + MAD outlier detection.
@@ -1743,6 +1803,9 @@ def handle_rerun_failures(campaign_state: CampaignState,
     write_results_json(validated_results, output_json)
     print_rotation_summary(validated_results)
 
+    # Phase 9 STAT-04/D-04: Auto-generate campaign report after rerun
+    generate_campaign_report(campaign_state, new_results, output_dir)
+
     # Finalize campaign state
     campaign_state.status = 'completed'
     campaign_state.completed_at = datetime.now().isoformat()
@@ -1945,6 +2008,12 @@ def main(input_path: str, output_csv: str, output_json: str | None = None,
                     write_results_csv(all_results, output_csv)
                     write_results_json(all_results, output_json)
                     print_rotation_summary(all_results)
+
+                    # Phase 9: Generate report for already-complete campaigns
+                    if not campaign_state.folder_stats:
+                        campaign_state.folder_stats = compute_folder_stats_from_results(all_results)
+                    generate_campaign_report(campaign_state, all_results, output_dir)
+
                     print("Done.")
                     return
                 # Fall through to normal processing with filtered pdfs
@@ -1971,6 +2040,12 @@ def main(input_path: str, output_csv: str, output_json: str | None = None,
                 write_results_csv(all_results, output_csv)
                 write_results_json(all_results, output_json)
                 print_rotation_summary(all_results)
+
+                # Phase 9: Generate report for already-complete campaigns
+                if not campaign_state.folder_stats:
+                    campaign_state.folder_stats = compute_folder_stats_from_results(all_results)
+                generate_campaign_report(campaign_state, all_results, output_dir)
+
                 print("Done.")
                 return
 
@@ -1996,6 +2071,9 @@ def main(input_path: str, output_csv: str, output_json: str | None = None,
         for result in all_results:
             if 'folder_path' not in result:
                 result['folder_path'] = compute_folder_path(pdf_paths[0], Path(input_path))
+
+        # Phase 9: Populate folder_stats for single-file mode
+        campaign_state.folder_stats = compute_folder_stats_from_results(all_results)
     else:
         # Multiple files (or resuming): parallel processing with checkpointing
         if workers is None:
@@ -2031,6 +2109,9 @@ def main(input_path: str, output_csv: str, output_json: str | None = None,
         start_time=start_time
     )
     print_batch_stats(stats)
+
+    # Phase 9 STAT-04/D-04: Auto-generate campaign report on completion
+    generate_campaign_report(campaign_state, all_results, output_dir)
 
     # Write batch_stats.json (D-12)
     with open(stats_path, 'w') as f:

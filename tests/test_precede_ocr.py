@@ -49,6 +49,11 @@ try:
 except ImportError:
     generate_campaign_report = None
 
+try:
+    from precede_ocr import compute_folder_stats_from_results
+except ImportError:
+    compute_folder_stats_from_results = None
+
 import time as time_module
 import re
 from dataclasses import asdict
@@ -3280,3 +3285,36 @@ class TestCampaignReportGeneration:
         content = (tmp_path / 'campaign_report.md').read_text(encoding='utf-8')
         assert 'Avg IDs/Page' in content
         assert '0.80' in content  # 8 ids / 10 pages = 0.80
+
+
+class TestReportGenerationWiring:
+    """Tests for generate_campaign_report() integration into main flow."""
+
+    def test_compute_folder_stats_from_results(self):
+        results = [
+            {'filename': 'a.pdf', 'page': 1, 'ids': ['12345'], 'notes': '', 'rotation_detected': 90, 'folder_path': 'sub1'},
+            {'filename': 'a.pdf', 'page': 2, 'ids': ['12346'], 'notes': 'preprocessed', 'rotation_detected': 90, 'folder_path': 'sub1'},
+            {'filename': 'b.pdf', 'page': 0, 'ids': [], 'notes': 'error: FileNotFoundError: x', 'rotation_detected': None, 'folder_path': 'sub2'},
+        ]
+        folder_stats = compute_folder_stats_from_results(results)
+
+        assert 'sub1' in folder_stats
+        assert 'sub2' in folder_stats
+        assert folder_stats['sub1']['total_pages'] == 2
+        assert folder_stats['sub1']['ids_found'] == 2
+        assert folder_stats['sub1']['preprocessing_fallbacks'] == 1
+        assert 'a.pdf' in folder_stats['sub1']['files']
+        assert folder_stats['sub2']['failed_files'] == ['b.pdf']
+
+    def test_main_wiring_exists(self):
+        """Verify main() contains generate_campaign_report call."""
+        import inspect
+        source = inspect.getsource(main)
+        assert 'generate_campaign_report' in source
+
+    def test_handle_rerun_failures_wiring_exists(self):
+        """Verify handle_rerun_failures() contains generate_campaign_report call."""
+        import inspect
+        from precede_ocr import handle_rerun_failures
+        source = inspect.getsource(handle_rerun_failures)
+        assert 'generate_campaign_report' in source
