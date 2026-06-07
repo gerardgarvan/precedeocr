@@ -33,7 +33,7 @@ Requirements for Campaign Runner milestone. Each maps to roadmap phases.
 - [x] **STAT-01**: User sees completion progress during processing (files done/total, IDs found, ETA)
 - [x] **STAT-02**: User sees success/failure counts and error summary on campaign exit
 - [x] **STAT-03**: User can view per-folder quality breakdown (success rate, error count, IDs per directory)
-- [ ] **STAT-04**: Campaign generates a Markdown report with per-folder stats, problem area highlights, and recommendations
+- [x] **STAT-04**: Campaign generates a Markdown report with per-folder stats, problem area highlights, and recommendations
 - [x] **STAT-05**: Statistics include preprocessing fallback trigger rates and rotation distribution
 
 ## v2 Requirements
@@ -83,7 +83,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STAT-01 | Phase 9 | Complete |
 | STAT-02 | Phase 9 | Complete |
 | STAT-03 | Phase 9 | Complete |
-| STAT-04 | Phase 9 | Pending |
+| STAT-04 | Phase 9 | Complete |
 | STAT-05 | Phase 9 | Complete |
 
 **Coverage:**
