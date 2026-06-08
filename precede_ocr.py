@@ -491,7 +491,8 @@ def process_single_pdf(pdf_path: str, debug: bool = False) -> list[dict]:
             page = doc[page_idx]
             # Per D-01: In-memory pixmap rendering, no disk I/O
             # alpha=False ensures RGB mode required for OCR
-            pix = page.get_pixmap(dpi=300, alpha=False)
+            # DPI 200 selected per Phase 10 benchmarks (43% faster than 300 DPI)
+            pix = page.get_pixmap(dpi=200, alpha=False)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
             # Extract IDs with multi-rotation OCR (unchanged)
@@ -2041,7 +2042,7 @@ def main(input_path: str, output_csv: str, output_json: str | None = None,
     else:
         # Multiple files (or resuming): parallel processing with checkpointing
         if workers is None:
-            workers = max(1, mp.cpu_count() - 1)
+            workers = 16  # Optimal for 20-core hybrid CPU (8P+12E), benchmarked in Phase 10
         print(f"Processing {len(pdf_paths)} remaining file(s) with {workers} workers...")
         all_results = process_all_pdfs(
             pdf_paths, workers=workers,
