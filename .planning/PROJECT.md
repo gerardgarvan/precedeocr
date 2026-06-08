@@ -12,7 +12,8 @@ Reliably extract every Precede ID from every page across 30K+ PDFs so the user c
 
 Shipped v1.1 Campaign Runner — 5,471 LOC Python (2,151 pipeline + 3,320 tests).
 230 tests passing. 94.9% baseline OCR accuracy on test corpus.
-Tech stack: Python 3, pytesseract, pdf2image/Poppler, OpenCV, Pillow, pandas, scipy.
+Phase 10 complete — PyMuPDF rendering, DPI 200, 16 workers. Estimated 4-11x speedup over v1.1.
+Tech stack: Python 3, pytesseract, PyMuPDF (fitz), OpenCV, Pillow, pandas, scipy.
 
 CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N --debug --fresh`
 
@@ -59,10 +60,10 @@ CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N
 
 ### Active
 
-- [ ] Switch PDF rendering to PyMuPDF for faster rasterization
-- [ ] Optimize Tesseract configuration for digit-only extraction
+- [ ] Switch PDF rendering to PyMuPDF for faster rasterization — Validated in Phase 10
+- [ ] Optimize Tesseract configuration for digit-only extraction — Whitelist validated in Phase 10
 - [ ] Reduce per-page OCR passes with smarter rotation strategy
-- [ ] Tune parallel worker allocation for hybrid CPU architecture
+- [ ] Tune parallel worker allocation for hybrid CPU architecture — Validated in Phase 10 (16 workers optimal)
 - [ ] Profile and optimize end-to-end pipeline throughput
 
 ### Out of Scope
@@ -110,6 +111,9 @@ CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N
 | Theil-Sen robust regression for sequence validation | OLS too sensitive to outliers; Theil-Sen + modified Z-score more reliable | ✓ Good — corrected from initial OLS approach in Phase 5 gap closure |
 | PSM 6 for Tesseract | Middle ground for full-page scans with isolated IDs | ✓ Good — better than PSM 7 (too restrictive) or PSM 3 (too broad) |
 | Memory-safe pdf2image (output_folder + paths_only) | Prevents OOM on multi-page PDFs | ✓ Good — critical for large corpus processing |
+| PyMuPDF replaces pdf2image/Poppler | 2-12x faster rendering, in-memory pixmaps, no Poppler binary dependency | ✓ Good — Phase 10, simpler code (-37 lines) |
+| DPI 200 (down from 300) | Benchmarked 43% faster, found more IDs (211 vs 186 on 100-PDF sample) | ✓ Good — Phase 10 benchmark validated |
+| 16 workers hard-coded default | Benchmarked optimal for 20-core hybrid CPU (8P+12E); 16-20 nearly identical | ✓ Good — Phase 10, --workers override preserved |
 
 ## Evolution
 
@@ -129,4 +133,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-07 after v1.2 milestone started*
+*Last updated: 2026-06-08 after Phase 10 complete*
