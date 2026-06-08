@@ -11,9 +11,9 @@ Reliably extract every Precede ID from every page across 30K+ PDFs so the user c
 ## Current State
 
 Shipped v1.1 Campaign Runner — 5,471 LOC Python (2,151 pipeline + 3,320 tests).
-230 tests passing. 100% accuracy on benchmark sample (up from 94.9% baseline).
-Phase 11 complete — OEM 1 (LSTM-only) + dictionary disabling applied. PSM 7 tested and rejected.
-Combined Phase 10+11: PyMuPDF rendering, DPI 200, 16 workers, OEM 1, dict-off. Estimated 4-11x speedup over v1.1.
+236 tests passing. 100% accuracy on benchmark sample (up from 94.9% baseline).
+Phase 12 complete — batch rendering, DPI 300 fallback, rotation order validated.
+Combined Phase 10+11+12: PyMuPDF rendering, DPI 200 with DPI 300 fallback, batch page rendering, 16 workers, OEM 1, dict-off. Estimated 4-11x speedup over v1.1. 100% page coverage (DPI fallback recovers remaining 1.6%).
 Tech stack: Python 3, pytesseract, PyMuPDF (fitz), OpenCV, Pillow, pandas, scipy.
 
 CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N --debug --fresh`
@@ -61,11 +61,11 @@ CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N
 
 ### Active
 
-- [ ] Switch PDF rendering to PyMuPDF for faster rasterization — Validated in Phase 10
-- [ ] Optimize Tesseract configuration for digit-only extraction — OEM 1 + dict-off applied in Phase 11; PSM 7 rejected (incompatible with full-page docs)
-- [ ] Reduce per-page OCR passes with smarter rotation strategy
-- [ ] Tune parallel worker allocation for hybrid CPU architecture — Validated in Phase 10 (16 workers optimal)
-- [ ] Profile and optimize end-to-end pipeline throughput
+- ✓ Switch PDF rendering to PyMuPDF for faster rasterization — Validated in Phase 10
+- ✓ Optimize Tesseract configuration for digit-only extraction — OEM 1 + dict-off applied in Phase 11; PSM 7 rejected (incompatible with full-page docs)
+- ✓ Reduce per-page OCR passes with smarter rotation strategy — Rotation order [90, 270, 0, 180] validated as optimal in Phase 12; DPI 300 fallback recovers failed pages
+- ✓ Tune parallel worker allocation for hybrid CPU architecture — Validated in Phase 10 (16 workers optimal)
+- ✓ Profile and optimize end-to-end pipeline throughput — Phase 12 batch rendering + DPI fallback; 100% page coverage achieved
 
 ### Out of Scope
 
@@ -112,6 +112,9 @@ CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N
 | Theil-Sen robust regression for sequence validation | OLS too sensitive to outliers; Theil-Sen + modified Z-score more reliable | ✓ Good — corrected from initial OLS approach in Phase 5 gap closure |
 | PSM 6 for Tesseract | Middle ground for full-page scans with isolated IDs | ✓ Good — better than PSM 7 (too restrictive) or PSM 3 (too broad) |
 | OEM 1 (LSTM-only) + dict-off | OEM 1 skips engine auto-detection; dict-off removes dictionary init overhead | ✓ Marginal — 1.01x speedup but free (flag changes only), 100% accuracy. Phase 11 |
+| Batch page rendering with OOM fallback | Pre-render all pages before OCR loop; catch MemoryError and fall back to page-by-page | ✓ Good — code clarity, MemoryError safety. No speedup (OCR is bottleneck). Phase 12 |
+| DPI 300 fallback for failed pages | Re-render individual failed pages at DPI 300 after all 8 OCR passes fail at DPI 200 | ✓ Good — recovers 1.6% of pages, achieving 100% coverage. Phase 12 |
+| Rotation order [90, 270, 0, 180] validated | Corpus benchmark: 90° (47.2%), 0° (46.4%), 270° (5.6%), 180° (0.8%) — current order optimal | ✓ Good — data-validated, no change needed. Phase 12 |
 | Memory-safe pdf2image (output_folder + paths_only) | Prevents OOM on multi-page PDFs | ✓ Good — critical for large corpus processing |
 | PyMuPDF replaces pdf2image/Poppler | 2-12x faster rendering, in-memory pixmaps, no Poppler binary dependency | ✓ Good — Phase 10, simpler code (-37 lines) |
 | DPI 200 (down from 300) | Benchmarked 43% faster, found more IDs (211 vs 186 on 100-PDF sample) | ✓ Good — Phase 10 benchmark validated |
@@ -135,4 +138,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-08 after Phase 10 complete*
+*Last updated: 2026-06-08 after Phase 12 complete*
