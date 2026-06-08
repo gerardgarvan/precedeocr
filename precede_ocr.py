@@ -15,6 +15,7 @@ import tempfile
 import os
 import time as time_module
 import multiprocessing as mp
+import logging
 from pathlib import Path
 from collections import defaultdict, Counter
 from datetime import datetime
@@ -454,14 +455,12 @@ def process_single_pdf(pdf_path: str, debug: bool = False) -> list[dict]:
     """
     End-to-end pipeline for one PDF file.
 
-    Implements PIPE-01 (single file), PIPE-02 (300 DPI), PIPE-04 (regex),
-    PIPE-05 (mapping), PIPE-06 (multiple IDs per page), PIPE-07 (no-ID flagging).
-
-    Steps:
-    1. Convert PDF to 300 DPI images (disk-backed to prevent OOM)
-    2. For each page: run multi-rotation OCR to extract all IDs
-    3. Record result for every page (even pages with no ID found)
-    4. Clean up temporary image files
+    Phase 12 enhancements:
+    - PIPE-04: Batch renders all pages upfront before OCR loop (D-09)
+    - PIPE-04: Falls back to page-by-page on MemoryError (D-10, D-11)
+    - PIPE-03: DPI 300 fallback for pages where all 8 OCR passes fail at DPI 200 (D-04, D-05)
+    - PIPE-03: DPI 300 re-renders individual failed pages only (D-08)
+    - PIPE-03: DPI fallback success flagged in notes column (D-07)
 
     Args:
         pdf_path: Path to PDF file
@@ -469,15 +468,12 @@ def process_single_pdf(pdf_path: str, debug: bool = False) -> list[dict]:
 
     Returns:
         List of dicts with keys: filename, page, ids, rotation_detected, notes
-        where ids is a list of valid ID strings (may be empty for no-match pages)
     """
-    # Extract filename for output
     filename = Path(pdf_path).name
 
     try:
         doc = fitz.open(pdf_path)
     except Exception as e:
-        # Per D-02: On PyMuPDF failure, log error and skip the file
         return [{
             'filename': filename,
             'page': 0,
@@ -487,17 +483,65 @@ def process_single_pdf(pdf_path: str, debug: bool = False) -> list[dict]:
         }]
 
     try:
-        results = []
-        for page_idx in range(len(doc)):
-            page = doc[page_idx]
-            # Per D-01: In-memory pixmap rendering, no disk I/O
-            # alpha=False ensures RGB mode required for OCR
-            # DPI 200 selected per Phase 10 benchmarks (43% faster than 300 DPI)
-            pix = page.get_pixmap(dpi=200, alpha=False)
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        num_pages = len(doc)
 
-            # Extract IDs with multi-rotation OCR (unchanged)
+        # === BATCH RENDERING (PIPE-04, D-09) ===
+        # Pre-render all pages at DPI 200 before OCR loop
+        try:
+            images = []
+            for page_idx in range(num_pages):
+                page = doc[page_idx]
+                pix = page.get_pixmap(dpi=200, alpha=False)
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                images.append(img)
+            batch_mode = True
+        except MemoryError:
+            # D-10: Fall back to page-by-page rendering for this PDF
+            # D-11: Log warning with filename and page count
+            logging.warning(
+                f"OOM during batch render: {filename} ({num_pages} pages) "
+                f"- falling back to page-by-page"
+            )
+            images = None
+            batch_mode = False
+
+        results = []
+
+        # === OCR LOOP ===
+        for page_idx in range(num_pages):
+            if batch_mode:
+                # Use pre-rendered image (batch path)
+                img = images[page_idx]
+            else:
+                # Render on-demand (fallback path, D-10)
+                page = doc[page_idx]
+                pix = page.get_pixmap(dpi=200, alpha=False)
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+            # Extract IDs with multi-rotation OCR at DPI 200
             ids_found, rotation, notes = extract_id_with_rotation(img, debug=debug)
+
+            # === DPI 300 FALLBACK (PIPE-03, D-04, D-05, D-08) ===
+            # Triggers ONLY after ALL 8 OCR passes fail at DPI 200
+            # (4 direct rotations + 4 preprocessed rotations)
+            if not ids_found:
+                # Re-render this specific page at DPI 300 (D-08: page-by-page only)
+                page = doc[page_idx]
+                pix_300 = page.get_pixmap(dpi=300, alpha=False)
+                img_300 = Image.frombytes("RGB", [pix_300.width, pix_300.height], pix_300.samples)
+
+                # Full 8-pass retry at DPI 300 (D-05)
+                ids_fallback, rotation_fallback, notes_fallback = extract_id_with_rotation(img_300, debug=debug)
+
+                if ids_fallback:
+                    # DPI 300 succeeded — use fallback results
+                    ids_found = ids_fallback
+                    rotation = rotation_fallback
+                    # D-07: Flag in notes column
+                    if 'preprocessed' in notes_fallback:
+                        notes = 'dpi_fallback+preprocessed'
+                    else:
+                        notes = 'dpi_fallback'
 
             # Record result (row for EVERY page, even no-match)
             results.append({
