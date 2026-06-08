@@ -425,7 +425,7 @@ def validate_accuracy(sample_results, baseline_csv_path):
     for _, row in baseline_df.iterrows():
         if pd.notna(row.get('id')):
             key = (row['filename'], int(row['page']))
-            baseline_ids[key].add(str(row['id']))
+            baseline_ids[key].add(str(int(row['id'])))
 
     # Group sample results by (filename, page) -> set of IDs
     sample_ids = defaultdict(set)
