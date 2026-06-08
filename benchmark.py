@@ -19,13 +19,16 @@ import time
 import multiprocessing as mp
 from pathlib import Path
 from collections import defaultdict
+import re
+import io
 import fitz  # PyMuPDF
 from PIL import Image
 import pandas as pd
 import pytesseract
 
 # Import from main pipeline
-from precede_ocr import extract_id_with_rotation, process_all_pdfs
+from precede_ocr import (extract_id_with_rotation, process_all_pdfs,
+                          normalize_digits, select_all_valid_ids, preprocess_image)
 
 
 def select_benchmark_corpus(corpus_dir, sample_size=100, seed=42):
@@ -470,6 +473,192 @@ def validate_accuracy(sample_results, baseline_csv_path):
 
     print()
     return accuracy
+
+
+def process_pdf_with_config(pdf_path, tesseract_config, dpi=200):
+    """
+    Process a single PDF with a specific Tesseract config string.
+
+    Reimplements the rotation loop from extract_id_with_rotation() to allow
+    config injection for benchmarking. Does NOT modify the main pipeline.
+
+    Per D-01: Enables independent testing of each config variant.
+    Per D-02: Reuses Phase 10 benchmark infrastructure patterns.
+
+    Args:
+        pdf_path: Path to PDF file
+        tesseract_config: Full Tesseract config string (e.g., '--psm 6 --oem 1 ...')
+        dpi: Rendering DPI (default 200, Phase 10 winner)
+
+    Returns:
+        List of result dicts with keys: filename, page, ids, rotation_detected, notes
+    """
+    filename = Path(pdf_path).name
+
+    try:
+        doc = fitz.open(str(pdf_path))
+    except Exception as e:
+        return [{
+            'filename': filename,
+            'page': 0,
+            'ids': [],
+            'rotation_detected': None,
+            'notes': f'error: {type(e).__name__}: {e}'
+        }]
+
+    try:
+        results = []
+        for page_idx in range(len(doc)):
+            page = doc[page_idx]
+            # Render at specified DPI
+            pix = page.get_pixmap(dpi=dpi, alpha=False)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+            # === Direct OCR attempt with custom config ===
+            ids_found = []
+            rotation_found = None
+            notes = ''
+
+            for angle in [90, 270, 0, 180]:  # Same order as main pipeline
+                if angle == 0:
+                    rotated_image = img
+                else:
+                    rotated_image = img.rotate(angle, expand=True)
+
+                # Run OCR with custom config
+                text = pytesseract.image_to_string(rotated_image, config=tesseract_config).strip()
+
+                # Normalize digit confusion characters
+                normalized_text = normalize_digits(text)
+
+                # Find 5-digit numbers with word boundaries
+                matches = re.findall(r'\b\d{5}\b', normalized_text)
+
+                if matches:
+                    # Select all valid IDs from this rotation
+                    selected_ids = select_all_valid_ids(matches)
+                    if selected_ids:
+                        ids_found = selected_ids
+                        rotation_found = angle
+                        notes = ''
+                        break  # Early exit on match
+
+            # === Preprocessing fallback (if no direct match) ===
+            if not ids_found:
+                preprocessed = preprocess_image(img)
+
+                for angle in [90, 270, 0, 180]:
+                    if angle == 0:
+                        rotated_image = preprocessed
+                    else:
+                        rotated_image = preprocessed.rotate(angle, expand=True)
+
+                    text = pytesseract.image_to_string(rotated_image, config=tesseract_config).strip()
+                    normalized_text = normalize_digits(text)
+                    matches = re.findall(r'\b\d{5}\b', normalized_text)
+
+                    if matches:
+                        selected_ids = select_all_valid_ids(matches)
+                        if selected_ids:
+                            ids_found = selected_ids
+                            rotation_found = angle
+                            notes = 'preprocessed'
+                            break
+
+            # If still no match, classify as failure
+            if not ids_found:
+                notes = 'no_match'
+
+            results.append({
+                'filename': filename,
+                'page': page_idx + 1,
+                'ids': ids_found,
+                'rotation_detected': rotation_found if ids_found else None,
+                'notes': notes
+            })
+
+        return results
+    finally:
+        doc.close()
+
+
+def generate_baseline_csv(corpus_dir, output_path, sample_size=100, seed=42):
+    """
+    Generate Phase 10 baseline CSV for accuracy comparison.
+
+    Runs current pipeline config (PSM 6, OEM 3, whitelist, DPI 200) on
+    the benchmark sample and saves results for later comparison.
+
+    Per D-03: This captures the Phase 10 DPI-200 baseline state.
+
+    Args:
+        corpus_dir: Path to PDF corpus directory
+        output_path: Path to save baseline CSV
+        sample_size: Number of PDFs to sample (default 100)
+        seed: Random seed (default 42)
+
+    Returns:
+        Path to generated CSV file
+    """
+    print("\n=== Generating Phase 10 Baseline CSV ===")
+
+    # Select sample corpus
+    sample_pdfs = select_benchmark_corpus(corpus_dir, sample_size, seed)
+
+    if not sample_pdfs:
+        print("ERROR: No PDFs to process.")
+        return None
+
+    # Process all PDFs at DPI 200 (Phase 10 winner)
+    print("Processing PDFs at DPI 200 (Phase 10 baseline)...")
+    all_results = []
+    for pdf_path in sample_pdfs:
+        pdf_results = run_single_pdf_at_dpi(pdf_path, 200)
+        all_results.extend(pdf_results)
+
+    # Flatten results into rows: one row per ID (or one row per page if no IDs)
+    rows = []
+    for result in all_results:
+        if result['page'] == 0:  # Skip error entries
+            continue
+
+        if result['ids']:
+            # One row per ID found
+            for id_val in result['ids']:
+                rows.append({
+                    'filename': result['filename'],
+                    'page': result['page'],
+                    'id': id_val,
+                    'rotation_detected': result['rotation_detected'],
+                    'notes': result['notes']
+                })
+        else:
+            # One row with empty ID for pages with no match
+            rows.append({
+                'filename': result['filename'],
+                'page': result['page'],
+                'id': '',
+                'rotation_detected': result['rotation_detected'],
+                'notes': result['notes']
+            })
+
+    # Create DataFrame and save
+    df = pd.DataFrame(rows)
+    df.to_csv(output_path, index=False)
+
+    # Print summary
+    total_pdfs = len(sample_pdfs)
+    total_pages = len([r for r in all_results if r['page'] > 0])
+    total_ids = sum(len(r['ids']) for r in all_results if r['page'] > 0)
+
+    print(f"\n=== Baseline CSV Generated ===")
+    print(f"Total PDFs: {total_pdfs}")
+    print(f"Total pages: {total_pages}")
+    print(f"Total IDs: {total_ids}")
+    print(f"Output: {output_path}")
+    print()
+
+    return output_path
 
 
 def main():
