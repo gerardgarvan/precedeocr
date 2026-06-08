@@ -27,7 +27,7 @@ import random
 import time
 import multiprocessing as mp
 from pathlib import Path
-from collections import defaultdict
+from collections import defaultdict, Counter
 import re
 import io
 import fitz  # PyMuPDF
@@ -908,6 +908,294 @@ def benchmark_tesseract_config(corpus_dir, baseline_csv=None, sample_size=100, s
     return df
 
 
+def benchmark_rotation_distribution(pdf_paths):
+    """
+    Analyze rotation distribution across sample corpus (Phase 12 D-02).
+
+    Runs OCR on sample and reports which rotation succeeded for each page
+    that found an ID. Validates current [90, 270, 0, 180] order or recommends
+    reordering based on corpus data (D-03).
+
+    Args:
+        pdf_paths: List of Path objects to process
+
+    Returns:
+        Counter object with rotation distribution
+    """
+    print("\n=== Rotation Distribution Benchmark ===")
+    print("Analyzing rotation success patterns across sample...")
+
+    rotation_counts = Counter()
+    total_pages = 0
+
+    for pdf_path in pdf_paths:
+        results = run_single_pdf_at_dpi(pdf_path, dpi=200)
+        for r in results:
+            if r['page'] > 0:  # Skip error entries
+                total_pages += 1
+                if r.get('rotation_detected') is not None:
+                    rotation_counts[r['rotation_detected']] += 1
+
+    total_with_ids = sum(rotation_counts.values())
+
+    # Build report
+    print("\n=== Rotation Distribution Results ===")
+    print(f"{'Rotation':<10} | {'Count':<7} | {'Percentage':<12}")
+    print("-" * 40)
+    for angle in [90, 270, 0, 180]:
+        count = rotation_counts.get(angle, 0)
+        pct = (count / total_with_ids * 100) if total_with_ids > 0 else 0.0
+        print(f"{angle}°{' ':<8} | {count:<7} | {pct:11.1f}%")
+
+    print(f"\nTotal pages processed: {total_pages}")
+    print(f"Pages with IDs found: {total_with_ids}")
+
+    # Recommendation (D-03)
+    if rotation_counts:
+        most_common = rotation_counts.most_common(1)[0][0]
+        most_common_count = rotation_counts[most_common]
+        most_common_pct = (most_common_count / total_with_ids * 100) if total_with_ids > 0 else 0.0
+
+        current_order = [90, 270, 0, 180]
+
+        print(f"\nMost common rotation: {most_common}° ({most_common_count} pages, {most_common_pct:.1f}%)")
+        print(f"Current hard-coded order: {current_order}")
+
+        if most_common == current_order[0]:
+            print("RECOMMENDATION: Keep current order (already optimal)")
+        else:
+            # Reorder to place most common first
+            recommended_order = [most_common] + [x for x in current_order if x != most_common]
+            print(f"RECOMMENDATION: Reorder to {recommended_order}")
+            print(f"This would reduce average OCR passes by trying most common rotation first.")
+
+    print()
+    return rotation_counts
+
+
+def benchmark_batch_rendering(pdf_paths):
+    """
+    Benchmark batch rendering vs page-by-page rendering (Phase 12 D-09, D-10).
+
+    Compares two approaches:
+    1. Batch: Render all pages upfront, then OCR loop (with MemoryError fallback)
+    2. Page-by-page: Render each page on-demand (existing approach)
+
+    Reports timing comparison and verifies ID extraction is identical.
+
+    Args:
+        pdf_paths: List of Path objects to process
+
+    Returns:
+        dict with timing results
+    """
+    print("\n=== Batch Rendering Benchmark ===")
+    print("Comparing batch vs page-by-page rendering on sample...")
+
+    import time
+
+    # Approach 1: Batch rendering with MemoryError fallback
+    print("\nTesting batch rendering approach...")
+    batch_start = time.perf_counter()
+    batch_pages = 0
+    batch_ids = 0
+    batch_oom_count = 0
+
+    for pdf_path in pdf_paths:
+        filename = Path(pdf_path).name
+        try:
+            doc = fitz.open(str(pdf_path))
+        except Exception:
+            continue
+
+        try:
+            # Batch render all pages
+            try:
+                images = []
+                for page_idx in range(len(doc)):
+                    page = doc[page_idx]
+                    pix = page.get_pixmap(dpi=200, alpha=False)
+                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    images.append(img)
+            except MemoryError:
+                # D-10: Fallback to page-by-page
+                import logging
+                logging.warning(f"OOM batch render: {filename} ({len(doc)} pages)")
+                batch_oom_count += 1
+                images = None
+
+            # OCR loop
+            for page_idx in range(len(doc)):
+                if images is not None:
+                    img = images[page_idx]
+                else:
+                    page = doc[page_idx]
+                    pix = page.get_pixmap(dpi=200, alpha=False)
+                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+                ids_found, rotation, notes = extract_id_with_rotation(img, debug=False)
+                batch_pages += 1
+                batch_ids += len(ids_found)
+        finally:
+            doc.close()
+
+    batch_elapsed = time.perf_counter() - batch_start
+
+    # Approach 2: Page-by-page rendering (existing)
+    print("Testing page-by-page rendering approach...")
+    pagewise_start = time.perf_counter()
+    pagewise_pages = 0
+    pagewise_ids = 0
+
+    for pdf_path in pdf_paths:
+        results = run_single_pdf_at_dpi(pdf_path, dpi=200)
+        for r in results:
+            if r['page'] > 0:
+                pagewise_pages += 1
+                pagewise_ids += len(r['ids'])
+
+    pagewise_elapsed = time.perf_counter() - pagewise_start
+
+    # Calculate metrics
+    batch_ms_per_page = (batch_elapsed / batch_pages * 1000) if batch_pages > 0 else 0
+    pagewise_ms_per_page = (pagewise_elapsed / pagewise_pages * 1000) if pagewise_pages > 0 else 0
+
+    # Print comparison table
+    print("\n=== Batch Rendering Results ===")
+    print(f"{'Approach':<20} | {'Time (s)':<10} | {'Pages':<7} | {'IDs':<7} | {'ms/page':<10}")
+    print("-" * 70)
+    print(f"{'Batch rendering':<20} | {batch_elapsed:10.1f} | {batch_pages:7} | {batch_ids:7} | {batch_ms_per_page:10.1f}")
+    print(f"{'Page-by-page':<20} | {pagewise_elapsed:10.1f} | {pagewise_pages:7} | {pagewise_ids:7} | {pagewise_ms_per_page:10.1f}")
+
+    if batch_oom_count > 0:
+        print(f"\nOOM fallbacks: {batch_oom_count} PDFs fell back to page-by-page rendering")
+
+    # Speedup factor
+    if pagewise_ms_per_page > 0:
+        speedup = pagewise_ms_per_page / batch_ms_per_page
+        if speedup > 1.0:
+            print(f"\nBatch is {speedup:.2f}x faster than page-by-page")
+        else:
+            print(f"\nBatch is {1/speedup:.2f}x slower than page-by-page")
+
+    # Verify IDs match
+    if batch_ids == pagewise_ids:
+        print(f"ID extraction: IDENTICAL ({batch_ids} IDs from both approaches)")
+    else:
+        print(f"WARNING: ID mismatch (batch={batch_ids}, page-by-page={pagewise_ids})")
+
+    print()
+
+    return {
+        'batch_time': batch_elapsed,
+        'pagewise_time': pagewise_elapsed,
+        'batch_ms_per_page': batch_ms_per_page,
+        'pagewise_ms_per_page': pagewise_ms_per_page,
+        'speedup': speedup if pagewise_ms_per_page > 0 else 1.0,
+        'oom_count': batch_oom_count
+    }
+
+
+def benchmark_dpi_fallback(pdf_paths):
+    """
+    Benchmark DPI fallback strategy (Phase 12 D-04, D-05, D-06, D-08).
+
+    For each page in sample:
+    1. Try DPI 200 (8 passes: 4 direct + 4 preprocessed)
+    2. If no IDs found, try DPI 300 (8 passes)
+    3. Report success rate at each DPI and speed impact
+
+    Validates D-06 assumption: >70% succeed at DPI 200
+
+    Args:
+        pdf_paths: List of Path objects to process
+
+    Returns:
+        dict with DPI fallback statistics
+    """
+    print("\n=== DPI Fallback Benchmark ===")
+    print("Testing conditional DPI fallback (DPI 200 → 300 on failure)...")
+
+    import time
+
+    stats = {
+        'total_pages': 0,
+        'success_200': 0,
+        'success_300_fallback': 0,
+        'total_fail': 0,
+        'time_200_total': 0.0,
+        'time_300_fallback_total': 0.0,
+    }
+
+    for pdf_path in pdf_paths:
+        try:
+            doc = fitz.open(str(pdf_path))
+        except Exception:
+            continue
+
+        try:
+            for page_idx in range(len(doc)):
+                page = doc[page_idx]
+                stats['total_pages'] += 1
+
+                # Try DPI 200
+                start_200 = time.perf_counter()
+                pix_200 = page.get_pixmap(dpi=200, alpha=False)
+                img_200 = Image.frombytes("RGB", [pix_200.width, pix_200.height], pix_200.samples)
+                ids_200, rotation_200, notes_200 = extract_id_with_rotation(img_200, debug=False)
+                stats['time_200_total'] += time.perf_counter() - start_200
+
+                if ids_200:
+                    # Succeeded at DPI 200
+                    stats['success_200'] += 1
+                else:
+                    # Failed at DPI 200, try DPI 300 fallback (D-04, D-08)
+                    start_300 = time.perf_counter()
+                    pix_300 = page.get_pixmap(dpi=300, alpha=False)
+                    img_300 = Image.frombytes("RGB", [pix_300.width, pix_300.height], pix_300.samples)
+                    ids_300, rotation_300, notes_300 = extract_id_with_rotation(img_300, debug=False)
+                    stats['time_300_fallback_total'] += time.perf_counter() - start_300
+
+                    if ids_300:
+                        # DPI 300 succeeded (D-07: flag in notes)
+                        stats['success_300_fallback'] += 1
+                    else:
+                        # Both DPI failed
+                        stats['total_fail'] += 1
+        finally:
+            doc.close()
+
+    # Print summary
+    total = stats['total_pages']
+    print(f"\n=== DPI Fallback Results ===")
+    print(f"Total pages processed: {total}")
+
+    if total > 0:
+        success_200_pct = stats['success_200'] / total * 100
+        success_300_pct = stats['success_300_fallback'] / total * 100
+        total_fail_pct = stats['total_fail'] / total * 100
+
+        print(f"Success at DPI 200: {stats['success_200']} ({success_200_pct:.1f}%)")
+        print(f"Success at DPI 300 fallback: {stats['success_300_fallback']} ({success_300_pct:.1f}%)")
+        print(f"Total failures (both DPI): {stats['total_fail']} ({total_fail_pct:.1f}%)")
+
+        # Validate D-06 assumption
+        if success_200_pct >= 70.0:
+            print(f"\nD-06 VALIDATED: {success_200_pct:.1f}% succeed at DPI 200 (≥70% threshold)")
+        else:
+            print(f"\nD-06 NOT MET: Only {success_200_pct:.1f}% succeed at DPI 200 (<70% threshold)")
+
+        # Timing breakdown
+        avg_time_200 = (stats['time_200_total'] / total * 1000) if total > 0 else 0
+        if stats['success_300_fallback'] > 0:
+            avg_time_300_fallback = (stats['time_300_fallback_total'] / stats['success_300_fallback'] * 1000)
+            print(f"\nAverage time at DPI 200: {avg_time_200:.1f} ms/page")
+            print(f"Average time for DPI 300 fallback: {avg_time_300_fallback:.1f} ms/page")
+
+    print()
+    return stats
+
+
 def main():
     """
     Main entry point for benchmark script.
@@ -929,6 +1217,12 @@ def main():
         help="Run Phase 11 Tesseract config benchmark (OEM/PSM/dict)")
     parser.add_argument('--generate-baseline', type=str, default=None,
         help="Generate Phase 10 baseline CSV at specified path")
+    parser.add_argument('--rotation-dist', action='store_true',
+        help="Run Phase 12 rotation distribution analysis")
+    parser.add_argument('--batch-render', action='store_true',
+        help="Run Phase 12 batch rendering benchmark")
+    parser.add_argument('--dpi-fallback', action='store_true',
+        help="Run Phase 12 DPI fallback coverage benchmark")
 
     args = parser.parse_args()
 
@@ -976,6 +1270,16 @@ def main():
             sample_size=args.sample_size,
             seed=args.seed
         )
+
+    # Phase 12 benchmarks
+    if args.rotation_dist:
+        rotation_counts = benchmark_rotation_distribution(sample_pdfs)
+
+    if args.batch_render:
+        batch_results = benchmark_batch_rendering(sample_pdfs)
+
+    if args.dpi_fallback:
+        dpi_fallback_stats = benchmark_dpi_fallback(sample_pdfs)
 
     # Print summary
     print("\n=== Benchmark Complete ===")
