@@ -99,7 +99,7 @@ Plans:
 | 8. Interactive Campaign Menu | v1.1 | 2/2 | Complete | 2026-06-07 |
 | 9. Per-Folder Statistics & Reporting | v1.1 | 2/2 | Complete | 2026-06-07 |
 | 10. Drop-in Performance Gains | v1.2 | 3/3 | Complete    | 2026-06-08 |
-| 11. Advanced Config Tuning | v1.2 | 2/2 | Complete   | 2026-06-08 |
+| 11. Advanced Config Tuning | v1.2 | 2/2 | Complete    | 2026-06-08 |
 | 12. Algorithmic Enhancements | v1.2 | 0/? | Not started | - |
 
 ## Notes (v1.2)
