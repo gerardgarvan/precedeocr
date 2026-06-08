@@ -11,8 +11,9 @@ Reliably extract every Precede ID from every page across 30K+ PDFs so the user c
 ## Current State
 
 Shipped v1.1 Campaign Runner — 5,471 LOC Python (2,151 pipeline + 3,320 tests).
-230 tests passing. 94.9% baseline OCR accuracy on test corpus.
-Phase 10 complete — PyMuPDF rendering, DPI 200, 16 workers. Estimated 4-11x speedup over v1.1.
+230 tests passing. 100% accuracy on benchmark sample (up from 94.9% baseline).
+Phase 11 complete — OEM 1 (LSTM-only) + dictionary disabling applied. PSM 7 tested and rejected.
+Combined Phase 10+11: PyMuPDF rendering, DPI 200, 16 workers, OEM 1, dict-off. Estimated 4-11x speedup over v1.1.
 Tech stack: Python 3, pytesseract, PyMuPDF (fitz), OpenCV, Pillow, pandas, scipy.
 
 CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N --debug --fresh`
@@ -61,7 +62,7 @@ CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N
 ### Active
 
 - [ ] Switch PDF rendering to PyMuPDF for faster rasterization — Validated in Phase 10
-- [ ] Optimize Tesseract configuration for digit-only extraction — Whitelist validated in Phase 10
+- [ ] Optimize Tesseract configuration for digit-only extraction — OEM 1 + dict-off applied in Phase 11; PSM 7 rejected (incompatible with full-page docs)
 - [ ] Reduce per-page OCR passes with smarter rotation strategy
 - [ ] Tune parallel worker allocation for hybrid CPU architecture — Validated in Phase 10 (16 workers optimal)
 - [ ] Profile and optimize end-to-end pipeline throughput
@@ -110,6 +111,7 @@ CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N
 | multiprocessing.Event for cooperative shutdown | Workers check event flag, not killed by signal; prevents mid-OCR corruption | ✓ Good — clean shutdown on Windows |
 | Theil-Sen robust regression for sequence validation | OLS too sensitive to outliers; Theil-Sen + modified Z-score more reliable | ✓ Good — corrected from initial OLS approach in Phase 5 gap closure |
 | PSM 6 for Tesseract | Middle ground for full-page scans with isolated IDs | ✓ Good — better than PSM 7 (too restrictive) or PSM 3 (too broad) |
+| OEM 1 (LSTM-only) + dict-off | OEM 1 skips engine auto-detection; dict-off removes dictionary init overhead | ✓ Marginal — 1.01x speedup but free (flag changes only), 100% accuracy. Phase 11 |
 | Memory-safe pdf2image (output_folder + paths_only) | Prevents OOM on multi-page PDFs | ✓ Good — critical for large corpus processing |
 | PyMuPDF replaces pdf2image/Poppler | 2-12x faster rendering, in-memory pixmaps, no Poppler binary dependency | ✓ Good — Phase 10, simpler code (-37 lines) |
 | DPI 200 (down from 300) | Benchmarked 43% faster, found more IDs (211 vs 186 on 100-PDF sample) | ✓ Good — Phase 10 benchmark validated |
