@@ -16,9 +16,9 @@
 ### Tesseract Tuning (TESS)
 
 - [x] **TESS-01**: OCR uses character whitelist constrained to digits 0-9
-- [ ] **TESS-02**: OCR uses OEM 1 (LSTM-only) mode if accuracy maintains >=94% baseline
-- [ ] **TESS-03**: OCR uses PSM 7 (single-line) mode if accuracy maintains >=94% baseline
-- [ ] **TESS-04**: OCR disables dictionary loading if accuracy maintains >=94% baseline
+- [x] **TESS-02**: OCR uses OEM 1 (LSTM-only) mode if accuracy maintains >=94% baseline
+- [x] **TESS-03**: OCR uses PSM 7 (single-line) mode if accuracy maintains >=94% baseline
+- [x] **TESS-04**: OCR disables dictionary loading if accuracy maintains >=94% baseline
 
 ### Pipeline Optimization (PIPE)
 
@@ -61,9 +61,9 @@ None deferred — all identified optimizations included in this milestone.
 | RENDER-01 | Phase 10 | Complete |
 | RENDER-02 | Phase 10 | Complete |
 | TESS-01 | Phase 10 | Complete |
-| TESS-02 | Phase 11 | Pending |
-| TESS-03 | Phase 11 | Pending |
-| TESS-04 | Phase 11 | Pending |
+| TESS-02 | Phase 11 | Complete |
+| TESS-03 | Phase 11 | Complete |
+| TESS-04 | Phase 11 | Complete |
 | PIPE-01 | Phase 10 | Complete |
 | PIPE-02 | Phase 12 | Pending |
 | PIPE-03 | Phase 12 | Pending |

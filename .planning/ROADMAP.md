@@ -67,10 +67,10 @@ Plans:
   3. OCR accuracy remains >=94% baseline with PSM 7 (single-line) enabled
   4. OCR accuracy remains >=94% baseline with dictionaries disabled, OR dictionary config reverted if accuracy drops
   5. Each Tesseract config change is independently benchmarked for speed and accuracy impact
-**Plans:** 2 plans
+**Plans:** 1/2 plans executed
 
 Plans:
-- [ ] 11-01-PLAN.md — Extend benchmark.py with Tesseract config testing (OEM/PSM/dict variants)
+- [x] 11-01-PLAN.md — Extend benchmark.py with Tesseract config testing (OEM/PSM/dict variants)
 - [ ] 11-02-PLAN.md — Run benchmarks, apply winning configs, document results
 
 ### Phase 12: Algorithmic Enhancements
@@ -99,7 +99,7 @@ Plans:
 | 8. Interactive Campaign Menu | v1.1 | 2/2 | Complete | 2026-06-07 |
 | 9. Per-Folder Statistics & Reporting | v1.1 | 2/2 | Complete | 2026-06-07 |
 | 10. Drop-in Performance Gains | v1.2 | 3/3 | Complete    | 2026-06-08 |
-| 11. Advanced Config Tuning | v1.2 | 0/2 | Planned | - |
+| 11. Advanced Config Tuning | v1.2 | 1/2 | In Progress|  |
 | 12. Algorithmic Enhancements | v1.2 | 0/? | Not started | - |
 
 ## Notes (v1.2)
