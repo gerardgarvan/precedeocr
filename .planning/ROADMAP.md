@@ -33,7 +33,7 @@
 <summary>🔧 v1.2 Performance Optimization (Phases 10-12) — IN PROGRESS</summary>
 
 - [x] **Phase 10: Drop-in Performance Gains** - PyMuPDF swap, Tesseract whitelist, DPI/worker benchmarking
-- [ ] **Phase 11: Advanced Config Tuning** - Tesseract OEM/PSM/dictionary optimization with corpus validation
+- [x] **Phase 11: Advanced Config Tuning** - Tesseract OEM/PSM/dictionary optimization with corpus validation
 - [ ] **Phase 12: Algorithmic Enhancements** - Smart rotation reordering, conditional DPI fallback, batch rendering
 
 </details>
@@ -83,7 +83,12 @@ Plans:
   3. Pipeline attempts lower DPI (200) first and re-renders at 300 DPI only on OCR failure, if >70% of corpus succeeds at lower DPI
   4. PyMuPDF batch-renders all pages before OCR loop without causing OOM on largest PDFs in corpus
   5. OCR accuracy remains >=94% baseline with all algorithmic enhancements enabled
-**Plans**: TBD
+**Plans:** 3 plans
+
+Plans:
+- [ ] 12-01-PLAN.md — Benchmark infrastructure + unit tests for Phase 12 enhancements
+- [ ] 12-02-PLAN.md — Implement batch rendering, DPI fallback, and rotation reorder in precede_ocr.py
+- [ ] 12-03-PLAN.md — Run benchmarks, validate accuracy, document results
 
 ## Progress
 
@@ -100,7 +105,7 @@ Plans:
 | 9. Per-Folder Statistics & Reporting | v1.1 | 2/2 | Complete | 2026-06-07 |
 | 10. Drop-in Performance Gains | v1.2 | 3/3 | Complete    | 2026-06-08 |
 | 11. Advanced Config Tuning | v1.2 | 2/2 | Complete    | 2026-06-08 |
-| 12. Algorithmic Enhancements | v1.2 | 0/? | Not started | - |
+| 12. Algorithmic Enhancements | v1.2 | 0/3 | Planning complete | - |
 
 ## Notes (v1.2)
 
@@ -119,4 +124,4 @@ Plans:
 - Phase 12 adds algorithmic complexity; only proceed if Phases 10+11 insufficient for target throughput
 
 ---
-*Last updated: 2026-06-08 after Phase 11 planning*
+*Last updated: 2026-06-08 after Phase 12 planning*
