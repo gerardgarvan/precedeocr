@@ -3368,27 +3368,33 @@ class TestPhase12Enhancements:
         mock_doc.close = MagicMock()
         return mock_doc
 
-    @pytest.mark.xfail(reason="Phase 12 Plan 02 not yet implemented")
     def test_batch_render_oom_fallback(self):
         """
         When batch rendering raises MemoryError, process_single_pdf should fall back
         to page-by-page rendering and still return valid results.
         """
         # Create mock doc with 2 pages
-        # First page renders OK, second page raises MemoryError during batch rendering
-        def page_0_render(dpi=200, alpha=False):
-            mock_pix = MagicMock()
-            mock_pix.width = 100
-            mock_pix.height = 100
-            mock_pix.samples = b'\x00' * (100 * 100 * 3)
-            return mock_pix
+        # Page 1's get_pixmap raises MemoryError on first call (batch render),
+        # but succeeds on subsequent calls (page-by-page fallback)
+        call_counts = [0, 0]  # Track calls per page
 
-        def page_1_render_first_call(dpi=200, alpha=False):
-            # First call (during batch render) raises MemoryError
-            raise MemoryError("Out of memory during batch render")
+        def make_page_render(page_idx):
+            def page_render(dpi=200, alpha=False):
+                call_counts[page_idx] += 1
+                if page_idx == 1 and call_counts[page_idx] == 1:
+                    # First call to page 1 (during batch render) raises MemoryError
+                    raise MemoryError("Out of memory during batch render")
+                # All other calls succeed
+                mock_pix = MagicMock()
+                mock_pix.width = 100
+                mock_pix.height = 100
+                mock_pix.samples = b'\x00' * (100 * 100 * 3)
+                return mock_pix
+            return page_render
 
         mock_doc = self._make_mock_doc(2, pixmap_side_effect={
-            1: page_1_render_first_call
+            0: make_page_render(0),
+            1: make_page_render(1)
         })
 
         with patch('precede_ocr.fitz.open', return_value=mock_doc):
@@ -3408,7 +3414,6 @@ class TestPhase12Enhancements:
         assert 'test.pdf' in warning_message
         assert '2' in warning_message  # page count
 
-    @pytest.mark.xfail(reason="Phase 12 Plan 02 not yet implemented")
     def test_batch_render_success(self):
         """
         When batch rendering succeeds (no MemoryError), process_single_pdf should
@@ -3426,7 +3431,6 @@ class TestPhase12Enhancements:
         for result in results:
             assert result['ids'] == ['12345']
 
-    @pytest.mark.xfail(reason="Phase 12 Plan 02 not yet implemented")
     def test_dpi_fallback_triggers_on_total_failure(self):
         """
         When extract_id_with_rotation returns empty at DPI 200 (all 8 passes failed),
@@ -3458,7 +3462,6 @@ class TestPhase12Enhancements:
         # extract_id_with_rotation should be called twice (200, then 300)
         assert call_count[0] == 2
 
-    @pytest.mark.xfail(reason="Phase 12 Plan 02 not yet implemented")
     def test_dpi_fallback_not_triggered_on_success(self):
         """
         When DPI 200 succeeds, DPI 300 fallback should NOT be attempted.
@@ -3470,14 +3473,14 @@ class TestPhase12Enhancements:
                 from precede_ocr import process_single_pdf
                 results = process_single_pdf('test.pdf')
 
-        # get_pixmap should be called exactly once (only DPI 200)
-        # Check that page.get_pixmap was called with dpi=200 only
+        # With batch rendering, get_pixmap is called once during batch render at DPI 200
+        # DPI 300 fallback should NOT be attempted (no second call)
         mock_page = mock_doc[0]
         assert mock_page.get_pixmap.call_count == 1
+        # Verify the call was with dpi=200 (not 300)
         call_args = mock_page.get_pixmap.call_args
         assert call_args[1]['dpi'] == 200
 
-    @pytest.mark.xfail(reason="Phase 12 Plan 02 not yet implemented")
     def test_dpi_fallback_notes_preprocessed(self):
         """
         When DPI 300 fallback succeeds with preprocessing, notes should be
@@ -3506,7 +3509,6 @@ class TestPhase12Enhancements:
         assert results[0]['ids'] == ['12345']
         assert results[0]['notes'] == 'dpi_fallback+preprocessed'
 
-    @pytest.mark.xfail(reason="Phase 12 Plan 02 not yet implemented")
     def test_dpi_fallback_both_fail(self):
         """
         When both DPI 200 and DPI 300 fail, result should have empty ids
