@@ -428,12 +428,16 @@ def validate_accuracy(sample_results, baseline_csv_path):
             baseline_ids[key].add(str(int(row['id'])))
 
     # Group sample results by (filename, page) -> set of IDs
+    # Normalize to int to strip leading zeros (e.g., "00688" -> "688")
     sample_ids = defaultdict(set)
     for result in sample_results:
         if result['page'] > 0:  # Skip error entries
             key = (result['filename'], result['page'])
             for id_val in result['ids']:
-                sample_ids[key].add(str(id_val))
+                try:
+                    sample_ids[key].add(str(int(id_val)))
+                except (ValueError, TypeError):
+                    sample_ids[key].add(str(id_val))
 
     # Compare pages present in BOTH
     common_keys = set(baseline_ids.keys()) & set(sample_ids.keys())
@@ -869,6 +873,10 @@ def benchmark_tesseract_config(corpus_dir, baseline_csv=None, sample_size=100, s
 
         # Update DataFrame with combination results
         df = pd.DataFrame(results)
+
+        # Recalculate speedup for all rows (individual results lack it after DataFrame rebuild)
+        if baseline_ms > 0:
+            df['speedup_vs_baseline'] = baseline_ms / df['ms_per_page']
 
     # === Phase 3: Summary ===
     print("\n=== Phase 11 Tesseract Config Benchmark Summary ===")
