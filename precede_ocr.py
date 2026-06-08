@@ -10,7 +10,6 @@ import re
 import sys
 import json
 import argparse
-import shutil
 import signal
 import tempfile
 import os
@@ -28,7 +27,7 @@ import cv2
 import numpy as np
 import pytesseract
 import pandas as pd
-from pdf2image import convert_from_path
+import fitz  # PyMuPDF
 from scipy.stats import theilslopes
 
 # Configure Tesseract path (auto-detect common Windows locations)
@@ -46,41 +45,6 @@ else:
     # Fall back to assuming it's in PATH
     pytesseract.pytesseract.tesseract_cmd = 'tesseract'
 
-# Configure Poppler path (auto-detect common Windows locations)
-# Poppler-for-Windows often installs with versioned subdirs, e.g.
-# ~/poppler/poppler-24.08.0/Library/bin/pdftoppm.exe
-# So we search fixed paths first, then recursively search known roots.
-_POPPLER_FIXED_PATHS = [
-    Path.home() / 'poppler' / 'Library' / 'bin',
-    Path.home() / 'poppler' / 'bin',
-    Path.home() / 'poppler',
-    Path(r'C:\Program Files\poppler\Library\bin'),
-    Path(r'C:\Program Files\poppler\bin'),
-]
-
-POPPLER_PATH = None
-# First: check fixed paths
-for _pop_path in _POPPLER_FIXED_PATHS:
-    if _pop_path.is_dir() and any(_pop_path.glob('pdftoppm*')):
-        POPPLER_PATH = str(_pop_path)
-        break
-
-# Second: recursive search in common root directories for versioned installs
-if POPPLER_PATH is None:
-    for _pop_root in [Path.home() / 'poppler', Path(r'C:\Program Files\poppler')]:
-        if _pop_root.is_dir():
-            for _match in _pop_root.rglob('pdftoppm*'):
-                POPPLER_PATH = str(_match.parent)
-                break
-        if POPPLER_PATH:
-            break
-
-if POPPLER_PATH is None:
-    print("WARNING: Could not auto-detect Poppler. Searched:")
-    for _p in _POPPLER_FIXED_PATHS:
-        print(f"  {_p} (exists={_p.is_dir()})")
-    print(f"  Recursive search in: {Path.home() / 'poppler'}")
-    print("Set POPPLER_PATH manually in precede_ocr.py or add Poppler to PATH.")
 
 # Module-level config for multiprocessing workers (set by main before pool spawn)
 _ERROR_LOG_PATH = None
@@ -506,45 +470,45 @@ def process_single_pdf(pdf_path: str, debug: bool = False) -> list[dict]:
         List of dicts with keys: filename, page, ids, rotation_detected, notes
         where ids is a list of valid ID strings (may be empty for no-match pages)
     """
-    # Create temporary directory for image files
-    temp_dir = tempfile.mkdtemp(prefix='precede_ocr_')
-
     # Extract filename for output
     filename = Path(pdf_path).name
 
     try:
-        # Convert PDF to images (memory-safe: disk-backed, paths only)
-        image_paths = convert_from_path(
-            pdf_path,
-            dpi=300,                    # PIPE-02: 300+ DPI for reliable digits
-            output_folder=temp_dir,     # Pitfall 1: disk-backed, not RAM
-            paths_only=True,            # Pitfall 1: returns file paths, prevents OOM
-            fmt='png',                  # Lossless format preserves OCR quality
-            poppler_path=POPPLER_PATH   # None if in PATH, else explicit path
-        )
+        doc = fitz.open(pdf_path)
+    except Exception as e:
+        # Per D-02: On PyMuPDF failure, log error and skip the file
+        return [{
+            'filename': filename,
+            'page': 0,
+            'ids': [],
+            'rotation_detected': None,
+            'notes': f'error: {type(e).__name__}: {e}'
+        }]
 
-        # Process each page
+    try:
         results = []
-        for page_num, image_path in enumerate(image_paths, start=1):
-            # Open image with context manager for proper cleanup (Pitfall 5)
-            with Image.open(image_path) as img:
-                # Extract IDs with multi-rotation OCR
-                ids_found, rotation, notes = extract_id_with_rotation(img, debug=debug)
+        for page_idx in range(len(doc)):
+            page = doc[page_idx]
+            # Per D-01: In-memory pixmap rendering, no disk I/O
+            # alpha=False ensures RGB mode required for OCR
+            pix = page.get_pixmap(dpi=300, alpha=False)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
-                # Record result (D-06: row for EVERY page, even no-match)
-                results.append({
-                    'filename': filename,
-                    'page': page_num,
-                    'ids': ids_found,             # List of IDs (empty if no match)
-                    'rotation_detected': rotation if ids_found else None,
-                    'notes': notes                # D-12: Failure reason or empty string
-                })
+            # Extract IDs with multi-rotation OCR (unchanged)
+            ids_found, rotation, notes = extract_id_with_rotation(img, debug=debug)
+
+            # Record result (row for EVERY page, even no-match)
+            results.append({
+                'filename': filename,
+                'page': page_idx + 1,  # 1-indexed page numbers
+                'ids': ids_found,
+                'rotation_detected': rotation if ids_found else None,
+                'notes': notes
+            })
 
         return results
-
     finally:
-        # Cleanup temp directory (ignore errors if files already removed)
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        doc.close()  # Critical: prevent memory leaks
 
 
 def write_results_csv(results: list[dict], output_path: str) -> None:
