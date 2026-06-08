@@ -393,8 +393,8 @@ def extract_id_with_rotation(image: Image.Image, debug: bool = False) -> tuple[l
         else:
             rotated_image = image.rotate(angle, expand=True)
 
-        # Tesseract config: PSM 6, LSTM engine, digits only (D-05: same for both passes)
-        config = '--psm 6 --oem 3 -c tessedit_char_whitelist=0123456789'
+        # Phase 11: OEM 1 (LSTM-only) + dict disabled -- 1.01x speedup, 100% accuracy per benchmark
+        config = '--psm 6 --oem 1 -c tessedit_char_whitelist=0123456789 -c load_system_dawg=false -c load_freq_dawg=false'
 
         # Run OCR
         text = pytesseract.image_to_string(rotated_image, config=config).strip()
@@ -429,7 +429,8 @@ def extract_id_with_rotation(image: Image.Image, debug: bool = False) -> tuple[l
         else:
             rotated_image = preprocessed.rotate(angle, expand=True)
 
-        config = '--psm 6 --oem 3 -c tessedit_char_whitelist=0123456789'  # D-05: same whitelist
+        # Phase 11: Must match config at line ~397 -- see benchmark_results.md
+        config = '--psm 6 --oem 1 -c tessedit_char_whitelist=0123456789 -c load_system_dawg=false -c load_freq_dawg=false'
         text = pytesseract.image_to_string(rotated_image, config=config).strip()
         ocr_texts_preprocessed.append(text)
 
