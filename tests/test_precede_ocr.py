@@ -3318,3 +3318,208 @@ class TestReportGenerationWiring:
         from precede_ocr import handle_rerun_failures
         source = inspect.getsource(handle_rerun_failures)
         assert 'generate_campaign_report' in source
+
+
+# -- Phase 12 Enhancements Tests --
+
+class TestPhase12Enhancements:
+    """
+    Test Phase 12 algorithmic enhancements: batch rendering, DPI fallback, rotation distribution.
+
+    These tests will FAIL (RED) until Plan 02 modifies process_single_pdf().
+    Marked with @pytest.mark.xfail so test suite stays green during Plan 01.
+    """
+
+    def _make_mock_doc(self, num_pages, pixmap_side_effect=None):
+        """
+        Create a mock fitz.Document with N pages returning fake pixmaps.
+
+        Args:
+            num_pages: Number of pages in the mock document
+            pixmap_side_effect: Dict mapping page index to side_effect (callable or Exception)
+
+        Returns:
+            Mock fitz.Document object
+        """
+        mock_doc = MagicMock()
+        mock_doc.__len__ = MagicMock(return_value=num_pages)
+
+        mock_pages = []
+        for i in range(num_pages):
+            mock_page = MagicMock()
+            mock_pix = MagicMock()
+            mock_pix.width = 100
+            mock_pix.height = 100
+            mock_pix.samples = b'\x00' * (100 * 100 * 3)  # RGB
+
+            if pixmap_side_effect and i in pixmap_side_effect:
+                side_effect = pixmap_side_effect[i]
+                if callable(side_effect):
+                    mock_page.get_pixmap = MagicMock(side_effect=side_effect)
+                else:
+                    # It's an exception
+                    mock_page.get_pixmap = MagicMock(side_effect=side_effect)
+            else:
+                mock_page.get_pixmap = MagicMock(return_value=mock_pix)
+
+            mock_pages.append(mock_page)
+
+        mock_doc.__getitem__ = MagicMock(side_effect=lambda idx: mock_pages[idx])
+        mock_doc.close = MagicMock()
+        return mock_doc
+
+    @pytest.mark.xfail(reason="Phase 12 Plan 02 not yet implemented")
+    def test_batch_render_oom_fallback(self):
+        """
+        When batch rendering raises MemoryError, process_single_pdf should fall back
+        to page-by-page rendering and still return valid results.
+        """
+        # Create mock doc with 2 pages
+        # First page renders OK, second page raises MemoryError during batch rendering
+        def page_0_render(dpi=200, alpha=False):
+            mock_pix = MagicMock()
+            mock_pix.width = 100
+            mock_pix.height = 100
+            mock_pix.samples = b'\x00' * (100 * 100 * 3)
+            return mock_pix
+
+        def page_1_render_first_call(dpi=200, alpha=False):
+            # First call (during batch render) raises MemoryError
+            raise MemoryError("Out of memory during batch render")
+
+        mock_doc = self._make_mock_doc(2, pixmap_side_effect={
+            1: page_1_render_first_call
+        })
+
+        with patch('precede_ocr.fitz.open', return_value=mock_doc):
+            with patch('precede_ocr.extract_id_with_rotation', return_value=(['12345'], 90, '')):
+                with patch('precede_ocr.logging.warning') as mock_warning:
+                    from precede_ocr import process_single_pdf
+                    results = process_single_pdf('test.pdf')
+
+        # Should return results for both pages (fallback succeeded)
+        assert len(results) == 2
+        assert results[0]['ids'] == ['12345']
+        assert results[1]['ids'] == ['12345']
+
+        # Should log warning about OOM
+        assert mock_warning.called
+        warning_message = mock_warning.call_args[0][0]
+        assert 'test.pdf' in warning_message
+        assert '2' in warning_message  # page count
+
+    @pytest.mark.xfail(reason="Phase 12 Plan 02 not yet implemented")
+    def test_batch_render_success(self):
+        """
+        When batch rendering succeeds (no MemoryError), process_single_pdf should
+        return results for all pages using batch-rendered images.
+        """
+        mock_doc = self._make_mock_doc(3)
+
+        with patch('precede_ocr.fitz.open', return_value=mock_doc):
+            with patch('precede_ocr.extract_id_with_rotation', return_value=(['12345'], 90, '')):
+                from precede_ocr import process_single_pdf
+                results = process_single_pdf('test.pdf')
+
+        # Should return 3 results (one per page)
+        assert len(results) == 3
+        for result in results:
+            assert result['ids'] == ['12345']
+
+    @pytest.mark.xfail(reason="Phase 12 Plan 02 not yet implemented")
+    def test_dpi_fallback_triggers_on_total_failure(self):
+        """
+        When extract_id_with_rotation returns empty at DPI 200 (all 8 passes failed),
+        process_single_pdf should re-render page at DPI 300 and try again.
+        """
+        mock_doc = self._make_mock_doc(1)
+
+        call_count = [0]
+
+        def mock_extract(image, debug=False):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First call (DPI 200): fail
+                return ([], None, 'no_digits')
+            else:
+                # Second call (DPI 300 fallback): succeed
+                return (['12345'], 90, '')
+
+        with patch('precede_ocr.fitz.open', return_value=mock_doc):
+            with patch('precede_ocr.extract_id_with_rotation', side_effect=mock_extract):
+                from precede_ocr import process_single_pdf
+                results = process_single_pdf('test.pdf')
+
+        # Should have found IDs via DPI 300 fallback
+        assert len(results) == 1
+        assert results[0]['ids'] == ['12345']
+        assert 'dpi_fallback' in results[0]['notes']
+
+        # extract_id_with_rotation should be called twice (200, then 300)
+        assert call_count[0] == 2
+
+    @pytest.mark.xfail(reason="Phase 12 Plan 02 not yet implemented")
+    def test_dpi_fallback_not_triggered_on_success(self):
+        """
+        When DPI 200 succeeds, DPI 300 fallback should NOT be attempted.
+        """
+        mock_doc = self._make_mock_doc(1)
+
+        with patch('precede_ocr.fitz.open', return_value=mock_doc):
+            with patch('precede_ocr.extract_id_with_rotation', return_value=(['12345'], 90, '')):
+                from precede_ocr import process_single_pdf
+                results = process_single_pdf('test.pdf')
+
+        # get_pixmap should be called exactly once (only DPI 200)
+        # Check that page.get_pixmap was called with dpi=200 only
+        mock_page = mock_doc[0]
+        assert mock_page.get_pixmap.call_count == 1
+        call_args = mock_page.get_pixmap.call_args
+        assert call_args[1]['dpi'] == 200
+
+    @pytest.mark.xfail(reason="Phase 12 Plan 02 not yet implemented")
+    def test_dpi_fallback_notes_preprocessed(self):
+        """
+        When DPI 300 fallback succeeds with preprocessing, notes should be
+        'dpi_fallback+preprocessed'.
+        """
+        mock_doc = self._make_mock_doc(1)
+
+        call_count = [0]
+
+        def mock_extract(image, debug=False):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First call (DPI 200): fail
+                return ([], None, 'no_digits')
+            else:
+                # Second call (DPI 300 fallback): succeed with preprocessing
+                return (['12345'], 90, 'preprocessed')
+
+        with patch('precede_ocr.fitz.open', return_value=mock_doc):
+            with patch('precede_ocr.extract_id_with_rotation', side_effect=mock_extract):
+                from precede_ocr import process_single_pdf
+                results = process_single_pdf('test.pdf')
+
+        # Should have correct notes combining dpi_fallback and preprocessed
+        assert len(results) == 1
+        assert results[0]['ids'] == ['12345']
+        assert results[0]['notes'] == 'dpi_fallback+preprocessed'
+
+    @pytest.mark.xfail(reason="Phase 12 Plan 02 not yet implemented")
+    def test_dpi_fallback_both_fail(self):
+        """
+        When both DPI 200 and DPI 300 fail, result should have empty ids
+        and original failure notes.
+        """
+        mock_doc = self._make_mock_doc(1)
+
+        with patch('precede_ocr.fitz.open', return_value=mock_doc):
+            with patch('precede_ocr.extract_id_with_rotation', return_value=([], None, 'no_digits')):
+                from precede_ocr import process_single_pdf
+                results = process_single_pdf('test.pdf')
+
+        # Should have empty IDs and failure notes
+        assert len(results) == 1
+        assert results[0]['ids'] == []
+        assert results[0]['notes'] == 'no_digits'
