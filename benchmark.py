@@ -1,16 +1,25 @@
 """
-Phase 10 Benchmark Script — DPI, Worker Count, Whitelist, and Accuracy Validation.
+Benchmark Script — DPI, Worker Count, Whitelist, and Tesseract Config Optimization.
 
 Usage:
-    python benchmark.py <corpus_dir> [--baseline-csv <path>] [--sample-size 100] [--seed 42]
+    # Phase 10 benchmarks (DPI, workers, whitelist)
+    python benchmark.py <corpus_dir> [--baseline-csv <path>]
+
+    # Phase 11: Generate baseline CSV first
+    python benchmark.py <corpus_dir> --generate-baseline baseline_phase10.csv
+
+    # Phase 11: Run Tesseract config benchmark
+    python benchmark.py <corpus_dir> --tesseract-config --baseline-csv baseline_phase10.csv
+
+    # Combined: generate baseline and benchmark in one run
+    python benchmark.py <corpus_dir> --generate-baseline baseline_phase10.csv --tesseract-config --baseline-csv baseline_phase10.csv --skip-dpi --skip-workers --skip-whitelist
 
 This script benchmarks the Precede OCR pipeline across different configurations
-to find optimal DPI and worker count settings. Results are printed as comparison
-tables and optionally saved to CSV.
+to find optimal settings. Results are printed as comparison tables.
 
 Per D-06: Standalone script, not integrated into main pipeline.
 Per D-07: Uses 100-PDF random sample for iteration speed.
-Per D-08: Accuracy validated by comparing IDs page-by-page against v1.1 baseline.
+Per D-08: Accuracy validated by comparing IDs page-by-page against baseline.
 """
 
 import argparse
@@ -661,6 +670,236 @@ def generate_baseline_csv(corpus_dir, output_path, sample_size=100, seed=42):
     return output_path
 
 
+def benchmark_tesseract_config(corpus_dir, baseline_csv=None, sample_size=100, seed=42):
+    """
+    Benchmark Tesseract config variants: OEM 1, PSM 7, dict-off.
+
+    Per D-01: Test each config independently first, then test winning combinations.
+    Per D-02: Reuse Phase 10 benchmark infrastructure.
+    Per D-03: Compare against Phase 10 DPI-200 baseline.
+    Per D-07: >=94% PASS, 93-94% SOFT (user decides), <93% FAIL.
+
+    Args:
+        corpus_dir: Path to PDF corpus directory
+        baseline_csv: Path to Phase 10 baseline CSV for accuracy comparison (optional)
+        sample_size: Number of PDFs to sample (default 100)
+        seed: Random seed (default 42)
+
+    Returns:
+        pandas DataFrame with results for all tested configs
+    """
+    print("\n=== Phase 11: Tesseract Config Benchmark ===")
+
+    # Select benchmark corpus (reuse Phase 10 infrastructure)
+    sample_pdfs = select_benchmark_corpus(corpus_dir, sample_size, seed)
+
+    if not sample_pdfs:
+        print("ERROR: No PDFs to process.")
+        return pd.DataFrame()
+
+    # Define config variants (D-01: independent testing)
+    configs = {
+        'baseline_phase10': '--psm 6 --oem 3 -c tessedit_char_whitelist=0123456789',
+        'oem1_only': '--psm 6 --oem 1 -c tessedit_char_whitelist=0123456789',
+        'psm7_only': '--psm 7 --oem 3 -c tessedit_char_whitelist=0123456789',
+        'dict_off_only': '--psm 6 --oem 3 -c tessedit_char_whitelist=0123456789 -c load_system_dawg=false -c load_freq_dawg=false',
+    }
+
+    results = []
+    all_config_results = {}  # Store detailed results for accuracy validation
+
+    print("\n=== Phase 1: Independent Config Testing ===\n")
+
+    for config_name, config_string in configs.items():
+        print(f"Testing: {config_name}")
+
+        start_time = time.perf_counter()
+        all_results = []
+
+        # Process all PDFs in sample with this config
+        for pdf_path in sample_pdfs:
+            pdf_results = process_pdf_with_config(pdf_path, config_string, dpi=200)
+            all_results.extend(pdf_results)
+
+        elapsed = time.perf_counter() - start_time
+
+        # Calculate stats
+        total_pages = len([r for r in all_results if r['page'] > 0])
+        total_ids = sum(len(r['ids']) for r in all_results if r['page'] > 0)
+        ms_per_page = (elapsed / total_pages * 1000) if total_pages > 0 else 0
+
+        # Store results for this config
+        result = {
+            'config': config_name,
+            'duration_sec': elapsed,
+            'pages': total_pages,
+            'ids_found': total_ids,
+            'ms_per_page': ms_per_page,
+            'accuracy_pct': None,
+            'pass_fail': 'N/A'
+        }
+
+        # Accuracy validation if baseline provided
+        if baseline_csv:
+            accuracy = validate_accuracy(all_results, baseline_csv)
+            result['accuracy_pct'] = accuracy
+
+            # Per D-07: classify result
+            if accuracy >= 94.0:
+                result['pass_fail'] = 'PASS'
+            elif accuracy >= 93.0:
+                result['pass_fail'] = 'SOFT'
+            else:
+                result['pass_fail'] = 'FAIL'
+
+        results.append(result)
+        all_config_results[config_name] = all_results
+
+        print(f"  Completed: {elapsed:.1f}s, {ms_per_page:.1f} ms/page, {total_ids} IDs")
+        if baseline_csv:
+            print(f"  Accuracy: {result['accuracy_pct']:.2f}% ({result['pass_fail']})")
+        print()
+
+    # Convert to DataFrame
+    df = pd.DataFrame(results)
+
+    # Calculate speedup vs baseline
+    baseline_row = df[df['config'] == 'baseline_phase10']
+    if not baseline_row.empty:
+        baseline_ms = baseline_row['ms_per_page'].values[0]
+        df['speedup_vs_baseline'] = baseline_ms / df['ms_per_page']
+    else:
+        df['speedup_vs_baseline'] = 1.0
+
+    # Print formatted comparison table
+    print("\n=== Independent Config Results ===")
+    print(f"{'Config':<20} | {'Duration (s)':<12} | {'Pages':<7} | {'IDs':<6} | {'ms/page':<8} | {'Speedup':<8} | {'Accuracy':<10} | {'Pass/Fail':<10}")
+    print("-" * 115)
+    for _, row in df.iterrows():
+        accuracy_str = f"{row['accuracy_pct']:.2f}%" if row['accuracy_pct'] is not None else "N/A"
+        print(f"{row['config']:<20} | {row['duration_sec']:12.1f} | {int(row['pages']):7} | {int(row['ids_found']):6} | {row['ms_per_page']:8.1f} | {row['speedup_vs_baseline']:8.2f}x | {accuracy_str:<10} | {row['pass_fail']:<10}")
+
+    # === Phase 2: Combination Testing (D-01) ===
+    winners = df[(df['pass_fail'].isin(['PASS', 'SOFT'])) & (df['config'] != 'baseline_phase10')]
+
+    if len(winners) >= 2:
+        print("\n=== Phase 2: Combination Testing ===\n")
+
+        winner_names = winners['config'].tolist()
+
+        # Build combination configs from winning individual flags
+        oem_flag = '--oem 1' if 'oem1_only' in winner_names else '--oem 3'
+        psm_flag = '--psm 7' if 'psm7_only' in winner_names else '--psm 6'
+        dict_flags = ' -c load_system_dawg=false -c load_freq_dawg=false' if 'dict_off_only' in winner_names else ''
+
+        combo_configs = {}
+
+        if len(winner_names) == 2:
+            # One combination: both winners
+            combo_name = '+'.join(w.replace('_only', '') for w in winner_names)
+            combo_config = f'{psm_flag} {oem_flag} -c tessedit_char_whitelist=0123456789{dict_flags}'
+            combo_configs[combo_name] = combo_config
+
+        elif len(winner_names) == 3:
+            # Test all three pairs + the triple
+            pairs = [
+                ('oem1_only', 'psm7_only'),
+                ('oem1_only', 'dict_off_only'),
+                ('psm7_only', 'dict_off_only')
+            ]
+
+            for pair in pairs:
+                if pair[0] in winner_names and pair[1] in winner_names:
+                    pair_oem = '--oem 1' if 'oem1' in pair[0] else '--oem 3'
+                    pair_psm = '--psm 7' if 'psm7' in pair[0] or 'psm7' in pair[1] else '--psm 6'
+                    pair_dict = ' -c load_system_dawg=false -c load_freq_dawg=false' if 'dict_off' in pair[0] or 'dict_off' in pair[1] else ''
+
+                    pair_name = '+'.join(p.replace('_only', '') for p in pair)
+                    pair_config = f'{pair_psm} {pair_oem} -c tessedit_char_whitelist=0123456789{pair_dict}'
+                    combo_configs[pair_name] = pair_config
+
+            # Triple combination
+            combo_configs['all_three'] = f'{psm_flag} {oem_flag} -c tessedit_char_whitelist=0123456789{dict_flags}'
+
+        # Test each combination
+        for combo_name, combo_config in combo_configs.items():
+            print(f"Testing combination: {combo_name}")
+
+            start_time = time.perf_counter()
+            all_results = []
+
+            for pdf_path in sample_pdfs:
+                pdf_results = process_pdf_with_config(pdf_path, combo_config, dpi=200)
+                all_results.extend(pdf_results)
+
+            elapsed = time.perf_counter() - start_time
+
+            total_pages = len([r for r in all_results if r['page'] > 0])
+            total_ids = sum(len(r['ids']) for r in all_results if r['page'] > 0)
+            ms_per_page = (elapsed / total_pages * 1000) if total_pages > 0 else 0
+
+            result = {
+                'config': combo_name,
+                'duration_sec': elapsed,
+                'pages': total_pages,
+                'ids_found': total_ids,
+                'ms_per_page': ms_per_page,
+                'accuracy_pct': None,
+                'pass_fail': 'N/A',
+                'speedup_vs_baseline': baseline_ms / ms_per_page if baseline_ms > 0 else 1.0
+            }
+
+            if baseline_csv:
+                accuracy = validate_accuracy(all_results, baseline_csv)
+                result['accuracy_pct'] = accuracy
+
+                if accuracy >= 94.0:
+                    result['pass_fail'] = 'PASS'
+                elif accuracy >= 93.0:
+                    result['pass_fail'] = 'SOFT'
+                else:
+                    result['pass_fail'] = 'FAIL'
+
+            results.append(result)
+
+            print(f"  Completed: {elapsed:.1f}s, {ms_per_page:.1f} ms/page, {total_ids} IDs")
+            if baseline_csv:
+                print(f"  Accuracy: {result['accuracy_pct']:.2f}% ({result['pass_fail']})")
+            print()
+
+        # Update DataFrame with combination results
+        df = pd.DataFrame(results)
+
+    # === Phase 3: Summary ===
+    print("\n=== Phase 11 Tesseract Config Benchmark Summary ===")
+
+    # Find best individual config (excluding baseline)
+    individual_configs = df[~df['config'].str.contains(r'\+|all_three', regex=True) & (df['config'] != 'baseline_phase10')]
+    if not individual_configs.empty:
+        best_individual = individual_configs.loc[individual_configs['speedup_vs_baseline'].idxmax()]
+        print(f"Best individual config: {best_individual['config']} ({best_individual['speedup_vs_baseline']:.2f}x speedup, {best_individual['accuracy_pct']:.2f}% accuracy, {best_individual['pass_fail']})")
+
+    # Find best combination (if any)
+    combination_configs = df[df['config'].str.contains(r'\+|all_three', regex=True)]
+    if not combination_configs.empty:
+        best_combo = combination_configs.loc[combination_configs['speedup_vs_baseline'].idxmax()]
+        print(f"Best combination: {best_combo['config']} ({best_combo['speedup_vs_baseline']:.2f}x speedup, {best_combo['accuracy_pct']:.2f}% accuracy, {best_combo['pass_fail']})")
+
+    # Recommend best passing config overall
+    passing_configs = df[df['pass_fail'].isin(['PASS', 'SOFT']) & (df['config'] != 'baseline_phase10')]
+    if not passing_configs.empty:
+        recommended = passing_configs.loc[passing_configs['speedup_vs_baseline'].idxmax()]
+        print(f"\nRecommended config: {recommended['config']} ({recommended['speedup_vs_baseline']:.2f}x speedup, {recommended['accuracy_pct']:.2f}% accuracy)")
+    else:
+        print("\nNo configs passed accuracy threshold. Recommend keeping baseline_phase10.")
+
+    print("\nPer D-08: Ship any improvement regardless of magnitude.")
+    print("Per D-07: Configs marked SOFT require user decision.")
+    print()
+
+    return df
+
+
 def main():
     """
     Main entry point for benchmark script.
@@ -678,6 +917,10 @@ def main():
     parser.add_argument('--skip-dpi', action='store_true', help="Skip DPI benchmark")
     parser.add_argument('--skip-workers', action='store_true', help="Skip worker count benchmark")
     parser.add_argument('--skip-whitelist', action='store_true', help="Skip whitelist benchmark")
+    parser.add_argument('--tesseract-config', action='store_true',
+        help="Run Phase 11 Tesseract config benchmark (OEM/PSM/dict)")
+    parser.add_argument('--generate-baseline', type=str, default=None,
+        help="Generate Phase 10 baseline CSV at specified path")
 
     args = parser.parse_args()
 
@@ -702,8 +945,8 @@ def main():
     if not args.skip_whitelist:
         whitelist_df = benchmark_whitelist(sample_pdfs, sample_count=20)
 
-    # Validate accuracy if baseline provided
-    if args.baseline_csv:
+    # Validate accuracy if baseline provided (Phase 10 validation)
+    if args.baseline_csv and not args.tesseract_config:
         # Run at DPI 300 for accuracy validation
         print("\nRunning DPI 300 for accuracy validation...")
         validation_results = []
@@ -711,6 +954,20 @@ def main():
             validation_results.extend(run_single_pdf_at_dpi(pdf_path, 300))
 
         accuracy = validate_accuracy(validation_results, args.baseline_csv)
+
+    # Generate baseline CSV if requested (Phase 11)
+    if args.generate_baseline:
+        generate_baseline_csv(args.corpus_dir, args.generate_baseline,
+                             args.sample_size, args.seed)
+
+    # Run Tesseract config benchmark (Phase 11)
+    if args.tesseract_config:
+        config_df = benchmark_tesseract_config(
+            args.corpus_dir,
+            baseline_csv=args.baseline_csv,
+            sample_size=args.sample_size,
+            seed=args.seed
+        )
 
     # Print summary
     print("\n=== Benchmark Complete ===")
