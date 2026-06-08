@@ -83,12 +83,12 @@ Plans:
   3. Pipeline attempts lower DPI (200) first and re-renders at 300 DPI only on OCR failure, if >70% of corpus succeeds at lower DPI
   4. PyMuPDF batch-renders all pages before OCR loop without causing OOM on largest PDFs in corpus
   5. OCR accuracy remains >=94% baseline with all algorithmic enhancements enabled
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
 
 Plans:
 - [x] 12-01-PLAN.md — Benchmark infrastructure + unit tests for Phase 12 enhancements
 - [x] 12-02-PLAN.md — Implement batch rendering, DPI fallback, and rotation reorder in precede_ocr.py
-- [ ] 12-03-PLAN.md — Run benchmarks, validate accuracy, document results
+- [x] 12-03-PLAN.md — Run benchmarks, validate accuracy, document results
 
 ## Progress
 
@@ -105,7 +105,7 @@ Plans:
 | 9. Per-Folder Statistics & Reporting | v1.1 | 2/2 | Complete | 2026-06-07 |
 | 10. Drop-in Performance Gains | v1.2 | 3/3 | Complete    | 2026-06-08 |
 | 11. Advanced Config Tuning | v1.2 | 2/2 | Complete    | 2026-06-08 |
-| 12. Algorithmic Enhancements | v1.2 | 2/3 | In Progress|  |
+| 12. Algorithmic Enhancements | v1.2 | 3/3 | Complete   | 2026-06-08 |
 
 ## Notes (v1.2)
 
