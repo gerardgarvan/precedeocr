@@ -50,10 +50,10 @@
   3. OCR accuracy remains >=94% baseline on test corpus with character whitelist enabled
   4. Pipeline uses optimal DPI (200/250/300 tested and fastest chosen) without accuracy drop
   5. Pipeline uses optimal worker count (16-20 tested and most efficient chosen) for 20-core CPU
-**Plans:** 3 plans
+**Plans:** 1/3 plans executed
 
 Plans:
-- [ ] 10-01-PLAN.md — PyMuPDF rendering swap + dependency cleanup + test updates
+- [x] 10-01-PLAN.md — PyMuPDF rendering swap + dependency cleanup + test updates
 - [ ] 10-02-PLAN.md — Benchmark script for DPI, workers, whitelist, and accuracy validation
 - [ ] 10-03-PLAN.md — Apply benchmark winners and document results
 
@@ -94,7 +94,7 @@ Plans:
 | 7. Graceful Shutdown Infrastructure | v1.1 | 2/2 | Complete | 2026-06-06 |
 | 8. Interactive Campaign Menu | v1.1 | 2/2 | Complete | 2026-06-07 |
 | 9. Per-Folder Statistics & Reporting | v1.1 | 2/2 | Complete | 2026-06-07 |
-| 10. Drop-in Performance Gains | v1.2 | 0/3 | Planning complete | - |
+| 10. Drop-in Performance Gains | v1.2 | 1/3 | In Progress|  |
 | 11. Advanced Config Tuning | v1.2 | 0/? | Not started | - |
 | 12. Algorithmic Enhancements | v1.2 | 0/? | Not started | - |
 

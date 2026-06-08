@@ -10,7 +10,7 @@
 
 ### PDF Rendering (RENDER)
 
-- [ ] **RENDER-01**: Pipeline uses PyMuPDF instead of pdf2image/Poppler for PDF-to-image conversion
+- [x] **RENDER-01**: Pipeline uses PyMuPDF instead of pdf2image/Poppler for PDF-to-image conversion
 - [ ] **RENDER-02**: Pipeline renders at optimal DPI determined by benchmarking (200/250/300 tested for speed vs accuracy)
 
 ### Tesseract Tuning (TESS)
@@ -29,7 +29,7 @@
 
 ### Quality Gates (QUAL)
 
-- [ ] **QUAL-01**: All optimizations maintain >=94% OCR accuracy on test corpus
+- [x] **QUAL-01**: All optimizations maintain >=94% OCR accuracy on test corpus
 - [ ] **QUAL-02**: Benchmark results documented (before/after speed comparison on representative sample)
 
 ---
@@ -58,7 +58,7 @@ None deferred — all identified optimizations included in this milestone.
 
 | REQ-ID | Phase | Status |
 |--------|-------|--------|
-| RENDER-01 | Phase 10 | Pending |
+| RENDER-01 | Phase 10 | Complete |
 | RENDER-02 | Phase 10 | Pending |
 | TESS-01 | Phase 10 | Pending |
 | TESS-02 | Phase 11 | Pending |
@@ -68,7 +68,7 @@ None deferred — all identified optimizations included in this milestone.
 | PIPE-02 | Phase 12 | Pending |
 | PIPE-03 | Phase 12 | Pending |
 | PIPE-04 | Phase 12 | Pending |
-| QUAL-01 | Phases 10, 11, 12 | Pending |
+| QUAL-01 | Phases 10, 11, 12 | Complete |
 | QUAL-02 | Phases 10, 11, 12 | Pending |
 
 **Coverage:** 12/12 requirements mapped (100%)
