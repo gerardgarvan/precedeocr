@@ -24,8 +24,8 @@
 
 - [x] **PIPE-01**: Worker count is benchmarked and set to optimal value for 20-core hybrid CPU
 - [x] **PIPE-02**: Multi-rotation strategy tries most common rotation first (based on corpus statistics)
-- [ ] **PIPE-03**: Pipeline uses conditional DPI fallback (lower DPI first, 300 DPI only on failure)
-- [ ] **PIPE-04**: PyMuPDF batch-renders all pages of a PDF before OCR loop
+- [x] **PIPE-03**: Pipeline uses conditional DPI fallback (lower DPI first, 300 DPI only on failure)
+- [x] **PIPE-04**: PyMuPDF batch-renders all pages of a PDF before OCR loop
 
 ### Quality Gates (QUAL)
 
@@ -66,8 +66,8 @@ None deferred — all identified optimizations included in this milestone.
 | TESS-04 | Phase 11 | Complete |
 | PIPE-01 | Phase 10 | Complete |
 | PIPE-02 | Phase 12 | Complete |
-| PIPE-03 | Phase 12 | Pending |
-| PIPE-04 | Phase 12 | Pending |
+| PIPE-03 | Phase 12 | Complete |
+| PIPE-04 | Phase 12 | Complete |
 | QUAL-01 | Phases 10, 11, 12 | Complete |
 | QUAL-02 | Phases 10, 11, 12 | Complete |
 
