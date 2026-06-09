@@ -1,42 +1,38 @@
-# Requirements: Precede OCR v1.2 Performance Optimization
+# Requirements: Precede OCR v1.3 Results Cleanup & ID Lookup
 
-**Milestone:** v1.2 Performance Optimization
-**Created:** 2026-06-07
-**Goal:** Dramatically reduce total processing time for 30K+ PDF corpus
+**Milestone:** v1.3 Results Cleanup & ID Lookup
+**Created:** 2026-06-09
+**Goal:** Produce a clean, Excel-friendly ID lookup file from production results, and investigate/fix pipeline errors and multi-ID noise.
 
 ---
 
 ## Active Requirements
 
-### PDF Rendering (RENDER)
+### ID Lookup (LOOK)
 
-- [x] **RENDER-01**: Pipeline uses PyMuPDF instead of pdf2image/Poppler for PDF-to-image conversion
-- [x] **RENDER-02**: Pipeline renders at optimal DPI determined by benchmarking (200/250/300 tested for speed vs accuracy)
+- [ ] **LOOK-01**: User can generate an ID lookup CSV sorted by ID number with columns: ID, Filename, Page, Folder
+- [ ] **LOOK-02**: Lookup CSV opens correctly in Excel (UTF-8 BOM encoding, proper quoting, IDs not interpreted as dates)
+- [ ] **LOOK-03**: User can run `python precede_ocr.py lookup <scan.csv>` as a CLI subcommand
 
-### Tesseract Tuning (TESS)
+### Error Investigation (ERR)
 
-- [x] **TESS-01**: OCR uses character whitelist constrained to digits 0-9
-- [x] **TESS-02**: OCR uses OEM 1 (LSTM-only) mode if accuracy maintains >=94% baseline
-- [x] **TESS-03**: OCR uses PSM 7 (single-line) mode if accuracy maintains >=94% baseline
-- [x] **TESS-04**: OCR disables dictionary loading if accuracy maintains >=94% baseline
+- [ ] **ERR-01**: User can investigate failed files — verify existence, categorize by error type (FileNotFoundError vs EmptyFileError), identify root causes
+- [ ] **ERR-02**: User can investigate no-match pages — determine if blank page, OCR failure, or missing ID label
+- [ ] **ERR-03**: Pipeline fixes are applied for fixable errors (e.g., path resolution issues, retry logic)
+- [ ] **ERR-04**: User receives a quality report (markdown) documenting all findings, error categories, and recommendations
 
-### Pipeline Optimization (PIPE)
+### Multi-ID Cleanup (MULTI)
 
-- [x] **PIPE-01**: Worker count is benchmarked and set to optimal value for 20-core hybrid CPU
-- [x] **PIPE-02**: Multi-rotation strategy tries most common rotation first (based on corpus statistics)
-- [x] **PIPE-03**: Pipeline uses conditional DPI fallback (lower DPI first, 300 DPI only on failure)
-- [x] **PIPE-04**: PyMuPDF batch-renders all pages of a PDF before OCR loop
-
-### Quality Gates (QUAL)
-
-- [x] **QUAL-01**: All optimizations maintain >=94% OCR accuracy on test corpus
-- [x] **QUAL-02**: Benchmark results documented (before/after speed comparison on representative sample)
+- [ ] **MULTI-01**: User can analyze multi-ID pages to determine which are real (multiple IDs per page) vs OCR noise
+- [ ] **MULTI-02**: Conservative deduplication flags likely noise without deleting — biases toward preservation, raw data always preserved
+- [ ] **MULTI-03**: User can run cleanup via CLI subcommand with sample validation before full deployment
 
 ---
 
 ## Future Requirements
 
-None deferred — all identified optimizations included in this milestone.
+- Automated re-processing pipeline for failed files (re-run with targeted fixes)
+- Visual inspection UI for manual review of ambiguous pages
 
 ---
 
@@ -44,13 +40,11 @@ None deferred — all identified optimizations included in this milestone.
 
 | Feature | Reason |
 |---------|--------|
-| GPU-accelerated OCR (EasyOCR/PaddleOCR) | CPU-only constraint; Tesseract sufficient for digits |
-| Manual CPU affinity for P/E cores | Windows scheduler handles hybrid CPU automatically; manual affinity can decrease performance |
-| Tesseract OSD for rotation detection | Unreliable per GitHub #4426; multi-rotation with regex validation proven |
-| DPI > 300 | Diminishing returns; can degrade accuracy by oversizing fonts |
-| Page-level multiprocessing | IPC overhead too high on Windows; PDF-level parallelism proven |
-| Cloud OCR services | No API costs, no internet dependency |
-| Resize/downscale before OCR | Counterproductive; render at target DPI directly |
+| Database backend (SQLite) | CSV is sufficient for Excel-based lookup workflow |
+| Cloud OCR re-processing | Local Tesseract only, per project constraints |
+| GUI/web interface for lookup | CLI + Excel is the user's workflow |
+| Fuzzy ID matching | Exact 5-digit match only — fuzzy adds false positive risk |
+| Full EDA profiling (ydata-profiling) | Overkill for targeted error analysis on 52K rows |
 
 ---
 
@@ -58,22 +52,18 @@ None deferred — all identified optimizations included in this milestone.
 
 | REQ-ID | Phase | Status |
 |--------|-------|--------|
-| RENDER-01 | Phase 10 | Complete |
-| RENDER-02 | Phase 10 | Complete |
-| TESS-01 | Phase 10 | Complete |
-| TESS-02 | Phase 11 | Complete |
-| TESS-03 | Phase 11 | Complete |
-| TESS-04 | Phase 11 | Complete |
-| PIPE-01 | Phase 10 | Complete |
-| PIPE-02 | Phase 12 | Complete |
-| PIPE-03 | Phase 12 | Complete |
-| PIPE-04 | Phase 12 | Complete |
-| QUAL-01 | Phases 10, 11, 12 | Complete |
-| QUAL-02 | Phases 10, 11, 12 | Complete |
+| LOOK-01 | TBD | Pending |
+| LOOK-02 | TBD | Pending |
+| LOOK-03 | TBD | Pending |
+| ERR-01 | TBD | Pending |
+| ERR-02 | TBD | Pending |
+| ERR-03 | TBD | Pending |
+| ERR-04 | TBD | Pending |
+| MULTI-01 | TBD | Pending |
+| MULTI-02 | TBD | Pending |
+| MULTI-03 | TBD | Pending |
 
-**Coverage:** 12/12 requirements mapped (100%)
-
-**Note:** QUAL-01 and QUAL-02 are embedded quality gates that apply to all phases, not separate phases. Each phase must maintain >=94% accuracy and document benchmarks.
+**Coverage:** 0/10 requirements mapped (roadmap pending)
 
 ---
-*Last updated: 2026-06-07*
+*Last updated: 2026-06-09*
