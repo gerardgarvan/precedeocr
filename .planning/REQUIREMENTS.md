@@ -52,18 +52,18 @@
 
 | REQ-ID | Phase | Status |
 |--------|-------|--------|
-| LOOK-01 | TBD | Pending |
-| LOOK-02 | TBD | Pending |
-| LOOK-03 | TBD | Pending |
-| ERR-01 | TBD | Pending |
-| ERR-02 | TBD | Pending |
-| ERR-03 | TBD | Pending |
-| ERR-04 | TBD | Pending |
-| MULTI-01 | TBD | Pending |
-| MULTI-02 | TBD | Pending |
-| MULTI-03 | TBD | Pending |
+| LOOK-01 | Phase 14 | Pending |
+| LOOK-02 | Phase 14 | Pending |
+| LOOK-03 | Phase 13 | Pending |
+| ERR-01 | Phase 15 | Pending |
+| ERR-02 | Phase 15 | Pending |
+| ERR-03 | Phase 15 | Pending |
+| ERR-04 | Phase 15 | Pending |
+| MULTI-01 | Phase 16 | Pending |
+| MULTI-02 | Phase 16 | Pending |
+| MULTI-03 | Phase 16 | Pending |
 
-**Coverage:** 0/10 requirements mapped (roadmap pending)
+**Coverage:** 10/10 requirements mapped (100%)
 
 ---
 *Last updated: 2026-06-09*
