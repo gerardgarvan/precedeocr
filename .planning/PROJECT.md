@@ -10,10 +10,9 @@ Reliably extract every Precede ID from every page across 30K+ PDFs so the user c
 
 ## Current State
 
-Shipped v1.1 Campaign Runner — 5,471 LOC Python (2,151 pipeline + 3,320 tests).
-236 tests passing. 100% accuracy on benchmark sample (up from 94.9% baseline).
-Phase 12 complete — batch rendering, DPI 300 fallback, rotation order validated.
-Combined Phase 10+11+12: PyMuPDF rendering, DPI 200 with DPI 300 fallback, batch page rendering, 16 workers, OEM 1, dict-off. Estimated 4-11x speedup over v1.1. 100% page coverage (DPI fallback recovers remaining 1.6%).
+Shipped v1.2 Performance Optimization — 5,471 LOC Python (2,151 pipeline + 3,320 tests).
+236 tests passing. 100% accuracy on benchmark sample.
+Production run complete: 30,365 files processed in 1h40m, 52,055 IDs extracted, 49 failures, 59 no-match pages.
 Tech stack: Python 3, pytesseract, PyMuPDF (fitz), OpenCV, Pillow, pandas, scipy.
 
 CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N --debug --fresh`
@@ -25,16 +24,16 @@ CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N
 - Auto-generated campaign_report.md with problem highlighting and recommendations
 - Error categorization and rotation/preprocessing distribution tracking
 
-## Current Milestone: v1.2 Performance Optimization
+## Current Milestone: v1.3 Results Cleanup & ID Lookup
 
-**Goal:** Dramatically reduce total processing time for the 30K+ PDF corpus by cutting per-page OCR latency and maximizing throughput across 20 cores.
+**Goal:** Produce a clean, Excel-friendly ID lookup file from production results, and investigate/fix pipeline errors and multi-ID noise.
 
 **Target features:**
-- Switch PDF rendering from pdf2image/Poppler to PyMuPDF (faster rasterization)
-- Optimize Tesseract configuration (character whitelist, optimal PSM/OEM for digits)
-- Smarter rotation strategy (reduce unnecessary OCR passes per page)
-- Tune parallelism for hybrid CPU (core-aware worker allocation)
-- Profile-guided optimizations (identify actual bottlenecks with timing data)
+- ID lookup CSV sorted by ID with columns: ID, Filename, Page, Folder
+- Investigate and fix 49 failed files (46 FileNotFoundError, 3 EmptyFileError)
+- Investigate and fix 59 no-match pages where OCR found no ID
+- Investigate 5,141 multi-ID pages to determine real vs OCR noise, clean up false positives
+- Error/quality report documenting findings and remaining issues
 
 ## Requirements
 
@@ -58,14 +57,19 @@ CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N
 - ✓ Graceful Ctrl+C handling (finishes current files, saves state cleanly) — v1.1
 - ✓ Comprehensive statistics: completion progress, quality metrics, per-folder breakdown — v1.1
 - ✓ Per-directory status tracking to identify problem areas — v1.1
+- ✓ Switch PDF rendering to PyMuPDF for faster rasterization — v1.2
+- ✓ Optimize Tesseract configuration for digit-only extraction — v1.2
+- ✓ Reduce per-page OCR passes with smarter rotation strategy — v1.2
+- ✓ Tune parallel worker allocation for hybrid CPU architecture — v1.2
+- ✓ Profile and optimize end-to-end pipeline throughput — v1.2
 
 ### Active
 
-- ✓ Switch PDF rendering to PyMuPDF for faster rasterization — Validated in Phase 10
-- ✓ Optimize Tesseract configuration for digit-only extraction — OEM 1 + dict-off applied in Phase 11; PSM 7 rejected (incompatible with full-page docs)
-- ✓ Reduce per-page OCR passes with smarter rotation strategy — Rotation order [90, 270, 0, 180] validated as optimal in Phase 12; DPI 300 fallback recovers failed pages
-- ✓ Tune parallel worker allocation for hybrid CPU architecture — Validated in Phase 10 (16 workers optimal)
-- ✓ Profile and optimize end-to-end pipeline throughput — Phase 12 batch rendering + DPI fallback; 100% page coverage achieved
+- [ ] Generate ID lookup CSV sorted by ID (columns: ID, Filename, Page, Folder) — v1.3
+- [ ] Investigate and fix failed files (FileNotFoundError, EmptyFileError) — v1.3
+- [ ] Investigate and fix no-match pages (59 pages with no ID extracted) — v1.3
+- [ ] Investigate multi-ID pages (5,141 pages) and clean up false positives — v1.3
+- [ ] Produce error/quality report documenting findings — v1.3
 
 ### Out of Scope
 
@@ -138,4 +142,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-08 after Phase 12 complete*
+*Last updated: 2026-06-09 — Milestone v1.3 started*
