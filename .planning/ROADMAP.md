@@ -10,7 +10,7 @@
 
 - [x] **Phase 13: CLI Subcommand Foundation** - Refactor main() to use argparse subparsers for scan/lookup/investigate/clean-multi-ids commands (completed 2026-06-10)
 - [x] **Phase 14: ID Lookup Generation** - Generate sorted ID lookup CSV with Excel-compatible formatting (completed 2026-06-10)
-- [ ] **Phase 15: Error Investigation & Reporting** - Investigate failed files and no-match pages, produce quality report
+- [x] **Phase 15: Error Investigation & Reporting** - Investigate failed files and no-match pages, produce quality report (completed 2026-06-10)
 - [ ] **Phase 16: Multi-ID Cleanup & Validation** - Analyze and clean multi-ID pages with conservative deduplication
 
 ---
@@ -56,10 +56,10 @@ Plans:
   3. Report analyzes all 59 no-match pages with categorization (blank page, OCR failure, missing ID label)
   4. Report exports `no_match_pages.csv` with filename, page, category, and actionable recommendations
   5. Pipeline fixes are identified and documented for fixable errors
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] 15-01-PLAN.md -- TDD: Implement cmd_investigate with error diagnosis, page re-rendering, and report generation
+- [x] 15-01-PLAN.md -- TDD: Implement cmd_investigate with error diagnosis, page re-rendering, and report generation
 
 ### Phase 16: Multi-ID Cleanup & Validation
 **Goal**: Users can distinguish real multi-ID pages from OCR noise and generate cleaned dataset
@@ -81,7 +81,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 13. CLI Subcommand Foundation | 1/1 | Complete    | 2026-06-10 |
 | 14. ID Lookup Generation | 1/1 | Complete    | 2026-06-10 |
-| 15. Error Investigation & Reporting | 0/1 | Planning complete | - |
+| 15. Error Investigation & Reporting | 1/1 | Complete   | 2026-06-10 |
 | 16. Multi-ID Cleanup & Validation | 0/? | Not started | - |
 
 ---

@@ -16,10 +16,10 @@
 
 ### Error Investigation (ERR)
 
-- [ ] **ERR-01**: User can investigate failed files — verify existence, categorize by error type (FileNotFoundError vs EmptyFileError), identify root causes
-- [ ] **ERR-02**: User can investigate no-match pages — determine if blank page, OCR failure, or missing ID label
-- [ ] **ERR-03**: Pipeline fixes are applied for fixable errors (e.g., path resolution issues, retry logic)
-- [ ] **ERR-04**: User receives a quality report (markdown) documenting all findings, error categories, and recommendations
+- [x] **ERR-01**: User can investigate failed files — verify existence, categorize by error type (FileNotFoundError vs EmptyFileError), identify root causes
+- [x] **ERR-02**: User can investigate no-match pages — determine if blank page, OCR failure, or missing ID label
+- [x] **ERR-03**: Pipeline fixes are applied for fixable errors (e.g., path resolution issues, retry logic)
+- [x] **ERR-04**: User receives a quality report (markdown) documenting all findings, error categories, and recommendations
 
 ### Multi-ID Cleanup (MULTI)
 
@@ -55,10 +55,10 @@
 | LOOK-01 | Phase 14 | Complete |
 | LOOK-02 | Phase 14 | Complete |
 | LOOK-03 | Phase 13 | Complete |
-| ERR-01 | Phase 15 | Pending |
-| ERR-02 | Phase 15 | Pending |
-| ERR-03 | Phase 15 | Pending |
-| ERR-04 | Phase 15 | Pending |
+| ERR-01 | Phase 15 | Complete |
+| ERR-02 | Phase 15 | Complete |
+| ERR-03 | Phase 15 | Complete |
+| ERR-04 | Phase 15 | Complete |
 | MULTI-01 | Phase 16 | Pending |
 | MULTI-02 | Phase 16 | Pending |
 | MULTI-03 | Phase 16 | Pending |
