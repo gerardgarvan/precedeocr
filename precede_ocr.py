@@ -2143,19 +2143,123 @@ def main(input_path: str, output_csv: str, output_json: str | None = None,
     print("Done.")
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Extract Precede IDs from PDF files')
-    parser.add_argument('input_path', help='Path to PDF file or directory of PDFs')
-    parser.add_argument('--output-csv', default='output/results.csv',
-                        help='Path to output CSV (default: output/results.csv)')
-    parser.add_argument('--output-json', default=None,
-                        help='Path to output JSON (default: same dir as CSV with .json extension)')
-    parser.add_argument('--workers', type=int, default=None,
-                        help='Number of parallel workers (default: cpu_count()-1)')
-    parser.add_argument('--debug', action='store_true',
-                        help='Print raw OCR text for each rotation to stderr (single file only)')
-    parser.add_argument('--fresh', action='store_true',
-                        help='Delete existing checkpoint and start from scratch')
-    args = parser.parse_args()
+def cmd_scan(args):
+    """Handler for scan subcommand. Unpacks argparse Namespace and calls existing main()."""
+    main(
+        input_path=args.input_path,
+        output_csv=args.output_csv,
+        output_json=args.output_json,
+        workers=args.workers,
+        debug=args.debug,
+        fresh=args.fresh,
+    )
 
-    main(args.input_path, args.output_csv, args.output_json, args.workers, args.debug, args.fresh)
+
+def cmd_lookup(args):
+    """Handler for lookup subcommand. Stub for Phase 14 implementation."""
+    print("lookup command not yet implemented. Coming in a future update.")
+    sys.exit(1)
+
+
+def cmd_investigate(args):
+    """Handler for investigate subcommand. Stub for Phase 15 implementation."""
+    print("investigate command not yet implemented. Coming in a future update.")
+    sys.exit(1)
+
+
+def cmd_clean_multi_ids(args):
+    """Handler for clean-multi-ids subcommand. Stub for Phase 16 implementation."""
+    print("clean-multi-ids command not yet implemented. Coming in a future update.")
+    sys.exit(1)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(
+        description='Precede OCR \u2014 PDF ID Scanner & Mapper'
+    )
+    subparsers = parser.add_subparsers(dest='command', required=True)
+
+    # ========== SCAN SUBCOMMAND (existing functionality) ==========
+    scan_parser = subparsers.add_parser(
+        'scan',
+        help='Extract Precede IDs from PDF files'
+    )
+    scan_parser.add_argument(
+        'input_path',
+        help='Path to PDF file or directory of PDFs'
+    )
+    scan_parser.add_argument(
+        '--output-csv', default='output/results.csv',
+        help='Path to output CSV (default: output/results.csv)'
+    )
+    scan_parser.add_argument(
+        '--output-json', default=None,
+        help='Path to output JSON (default: same dir as CSV with .json extension)'
+    )
+    scan_parser.add_argument(
+        '--workers', type=int, default=None,
+        help='Number of parallel workers (default: cpu_count()-1)'
+    )
+    scan_parser.add_argument(
+        '--debug', action='store_true',
+        help='Print raw OCR text for each rotation to stderr (single file only)'
+    )
+    scan_parser.add_argument(
+        '--fresh', action='store_true',
+        help='Delete existing checkpoint and start from scratch'
+    )
+    scan_parser.set_defaults(func=cmd_scan)
+
+    # ========== LOOKUP SUBCOMMAND (stub for Phase 14) ==========
+    lookup_parser = subparsers.add_parser(
+        'lookup',
+        help='Generate sorted ID lookup CSV from scan results'
+    )
+    lookup_parser.add_argument(
+        'scan_csv',
+        help='Path to scan results CSV'
+    )
+    lookup_parser.add_argument(
+        '--output', default='output/lookup.csv',
+        help='Output path for lookup CSV (default: output/lookup.csv)'
+    )
+    lookup_parser.set_defaults(func=cmd_lookup)
+
+    # ========== INVESTIGATE SUBCOMMAND (stub for Phase 15) ==========
+    investigate_parser = subparsers.add_parser(
+        'investigate',
+        help='Investigate failed files and no-match pages'
+    )
+    investigate_parser.add_argument(
+        '--report', default='output/quality_report.md',
+        help='Output path for quality report (default: output/quality_report.md)'
+    )
+    investigate_parser.set_defaults(func=cmd_investigate)
+
+    # ========== CLEAN-MULTI-IDS SUBCOMMAND (stub for Phase 16) ==========
+    clean_parser = subparsers.add_parser(
+        'clean-multi-ids',
+        help='Clean multi-ID pages with conservative deduplication'
+    )
+    clean_parser.add_argument(
+        'scan_csv',
+        help='Path to scan results CSV'
+    )
+    clean_parser.add_argument(
+        '--output', default='output/results_cleaned.csv',
+        help='Output path for cleaned CSV (default: output/results_cleaned.csv)'
+    )
+    clean_parser.add_argument(
+        '--sample-size', type=int, default=200,
+        help='Sample size for validation (default: 200)'
+    )
+    clean_parser.set_defaults(func=cmd_clean_multi_ids)
+
+    # D-02: No arguments shows help and exits
+    if len(sys.argv) == 1:
+        parser.print_help()
+        sys.exit(0)
+
+    # Parse and dispatch
+    args = parser.parse_args()
+    args.func(args)
