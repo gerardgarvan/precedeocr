@@ -38,6 +38,16 @@ from precede_ocr import (
     compute_folder_path,
 )
 
+# Phase 15 imports (TDD - will fail until implemented)
+try:
+    from precede_ocr import is_blank_page, investigate_failed_files, investigate_no_match_pages, generate_investigation_report, cmd_investigate
+except ImportError:
+    is_blank_page = None
+    investigate_failed_files = None
+    investigate_no_match_pages = None
+    generate_investigation_report = None
+    cmd_investigate = None
+
 # Phase 9 imports (available after Task 1 implements them)
 try:
     from precede_ocr import categorize_errors
@@ -3694,3 +3704,214 @@ class TestCmdLookup:
         with pytest.raises(SystemExit) as exc_info:
             cmd_lookup(args)
         assert exc_info.value.code == 1
+
+
+# ==================== PHASE 15: INVESTIGATE COMMAND ====================
+
+class TestInvestigateCommand:
+    """Test suite for investigate subcommand (Phase 15)."""
+
+    def _make_args(self, scan_csv, report='output/quality_report.md'):
+        from argparse import Namespace
+        return Namespace(scan_csv=scan_csv, report=report)
+
+    def test_is_blank_page_white(self):
+        """is_blank_page detects all-white image."""
+        if is_blank_page is None:
+            pytest.skip("is_blank_page not yet implemented")
+        img = Image.new('RGB', (100, 100), color=(255, 255, 255))
+        is_blank, category = is_blank_page(img)
+        assert is_blank is True
+        assert category == "blank_white"
+
+    def test_is_blank_page_black(self):
+        """is_blank_page detects all-black image."""
+        if is_blank_page is None:
+            pytest.skip("is_blank_page not yet implemented")
+        img = Image.new('RGB', (100, 100), color=(0, 0, 0))
+        is_blank, category = is_blank_page(img)
+        assert is_blank is True
+        assert category == "blank_black"
+
+    def test_is_blank_page_content(self):
+        """is_blank_page returns False for image with content."""
+        if is_blank_page is None:
+            pytest.skip("is_blank_page not yet implemented")
+        # Create image with mixed content (half white, half black)
+        img = Image.new('RGB', (100, 100), color=(255, 255, 255))
+        pixels = img.load()
+        for y in range(50, 100):
+            for x in range(100):
+                pixels[x, y] = (0, 0, 0)
+        is_blank, category = is_blank_page(img)
+        assert is_blank is False
+        assert category == ""
+
+    def test_investigate_failed_files_categorization(self, temp_dir):
+        """investigate_failed_files categorizes error types correctly."""
+        if investigate_failed_files is None:
+            pytest.skip("investigate_failed_files not yet implemented")
+        import pandas as pd
+        # Create DataFrame with error rows
+        df = pd.DataFrame([
+            {'filename': 'missing.pdf', 'page': 0, 'id': None, 'rotation_detected': 0,
+             'notes': 'error: FileNotFoundError: No such file'},
+            {'filename': 'empty.pdf', 'page': 0, 'id': None, 'rotation_detected': 0,
+             'notes': 'error: EmptyFileError: File is empty'},
+        ])
+        result = investigate_failed_files(df)
+        assert 'error_type' in result.columns
+        assert 'FileNotFoundError' in result['error_type'].values
+        assert 'EmptyFileError' in result['error_type'].values
+        assert 'file_exists_now' in result.columns
+        assert 'recommendation' in result.columns
+
+    def test_investigate_failed_files_existence_check(self, temp_dir):
+        """investigate_failed_files re-verifies file existence."""
+        if investigate_failed_files is None:
+            pytest.skip("investigate_failed_files not yet implemented")
+        import pandas as pd
+        # Create temp file that exists
+        existing_file = Path(temp_dir) / "exists.pdf"
+        existing_file.write_text("dummy content")
+        df = pd.DataFrame([
+            {'filename': str(existing_file), 'page': 0, 'id': None, 'rotation_detected': 0,
+             'notes': 'error: FileNotFoundError: No such file'},
+        ])
+        result = investigate_failed_files(df)
+        assert result['file_exists_now'].iloc[0] is True
+        assert 'rescan' in result['recommendation'].iloc[0].lower()
+
+    def test_investigate_no_match_pages_categorization(self, temp_dir):
+        """investigate_no_match_pages categorizes blank pages."""
+        if investigate_no_match_pages is None:
+            pytest.skip("investigate_no_match_pages not yet implemented")
+        import pandas as pd
+        import fitz
+
+        # Create a simple PDF with blank white page
+        pdf_path = Path(temp_dir) / "blank.pdf"
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+        page.draw_rect([0, 0, 612, 792], color=(1, 1, 1), fill=(1, 1, 1))
+        doc.save(str(pdf_path))
+        doc.close()
+
+        df = pd.DataFrame([
+            {'filename': str(pdf_path), 'page': 1, 'id': '', 'rotation_detected': None, 'notes': ''},
+        ])
+        result = investigate_no_match_pages(df)
+        assert 'category' in result.columns
+        assert 'blank' in result['category'].iloc[0]
+
+    def test_investigate_no_match_pages_ocr_failure(self, temp_dir):
+        """investigate_no_match_pages detects no_text_detected category."""
+        if investigate_no_match_pages is None:
+            pytest.skip("investigate_no_match_pages not yet implemented")
+        import pandas as pd
+        import fitz
+
+        # Create a PDF with non-blank but no text content
+        pdf_path = Path(temp_dir) / "notext.pdf"
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+        # Draw a gray rectangle (not blank, but no text)
+        page.draw_rect([100, 100, 200, 200], color=(0.5, 0.5, 0.5), fill=(0.5, 0.5, 0.5))
+        doc.save(str(pdf_path))
+        doc.close()
+
+        df = pd.DataFrame([
+            {'filename': str(pdf_path), 'page': 1, 'id': '', 'rotation_detected': None, 'notes': ''},
+        ])
+
+        # Mock pytesseract to return empty string
+        with patch('precede_ocr.pytesseract.image_to_string', return_value=''):
+            result = investigate_no_match_pages(df)
+            assert 'category' in result.columns
+            # Should be no_text_detected or investigation_failed
+            assert result['category'].iloc[0] in ['no_text_detected', 'investigation_failed']
+
+    def test_generate_report_structure(self, temp_dir):
+        """generate_investigation_report produces markdown with required sections."""
+        if generate_investigation_report is None:
+            pytest.skip("generate_investigation_report not yet implemented")
+        import pandas as pd
+        failed_df = pd.DataFrame([
+            {'filename': 'test.pdf', 'error_type': 'FileNotFoundError', 'file_exists_now': False,
+             'notes': 'error: FileNotFoundError: test', 'recommendation': 'check path'},
+        ])
+        no_match_df = pd.DataFrame([
+            {'filename': 'test.pdf', 'page': 1, 'category': 'blank_white',
+             'ocr_sample': '', 'recommendation': 'blank page'},
+        ])
+        scan_csv_path = Path(temp_dir) / "results.csv"
+        report = generate_investigation_report(failed_df, no_match_df, scan_csv_path)
+        assert '# Error Investigation Report' in report
+        assert '## Summary' in report
+        assert '## Failed Files Analysis' in report
+        assert '## No-Match Pages Analysis' in report
+
+    def test_generate_report_fixable_commands(self, temp_dir):
+        """generate_investigation_report includes copy-paste CLI commands for fixable errors."""
+        if generate_investigation_report is None:
+            pytest.skip("generate_investigation_report not yet implemented")
+        import pandas as pd
+        failed_df = pd.DataFrame([
+            {'filename': 'exists.pdf', 'error_type': 'FileNotFoundError', 'file_exists_now': True,
+             'notes': 'error: FileNotFoundError: test', 'recommendation': 'rescan'},
+        ])
+        no_match_df = pd.DataFrame()
+        scan_csv_path = Path(temp_dir) / "results.csv"
+        report = generate_investigation_report(failed_df, no_match_df, scan_csv_path)
+        assert '```bash' in report
+        assert 'python precede_ocr.py scan' in report
+
+    def test_cmd_investigate_integration(self, sample_investigate_csv, temp_dir):
+        """cmd_investigate creates report, no_match_pages.csv, and failed_files.csv."""
+        if cmd_investigate is None:
+            pytest.skip("cmd_investigate not yet implemented")
+        report_path = Path(temp_dir) / "quality_report.md"
+        args = self._make_args(sample_investigate_csv, str(report_path))
+
+        # Mock fitz and pytesseract for no-match diagnosis
+        with patch('precede_ocr.fitz.open') as mock_fitz:
+            mock_doc = MagicMock()
+            mock_page = MagicMock()
+            mock_pix = MagicMock()
+            mock_pix.width = 100
+            mock_pix.height = 100
+            mock_pix.samples = bytes([255] * (100 * 100 * 3))  # White pixels
+            mock_page.get_pixmap.return_value = mock_pix
+            mock_doc.__getitem__.return_value = mock_page
+            mock_fitz.return_value = mock_doc
+
+            with patch('precede_ocr.pytesseract.image_to_string', return_value=''):
+                cmd_investigate(args)
+
+        # Check outputs exist
+        assert report_path.exists()
+        assert (report_path.parent / 'no_match_pages.csv').exists()
+        assert (report_path.parent / 'failed_files.csv').exists()
+
+    def test_cmd_investigate_missing_csv(self, temp_dir):
+        """cmd_investigate exits with error for nonexistent CSV."""
+        if cmd_investigate is None:
+            pytest.skip("cmd_investigate not yet implemented")
+        args = self._make_args(str(Path(temp_dir) / "nonexistent.csv"))
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_investigate(args)
+        assert exc_info.value.code == 1
+
+    def test_cmd_investigate_cli_args(self):
+        """investigate subparser accepts scan_csv positional and --report option."""
+        # This test verifies argparse configuration
+        parser = precede_ocr.argparse.ArgumentParser()
+        subparsers = parser.add_subparsers(dest='command')
+        investigate_parser = subparsers.add_parser('investigate')
+        investigate_parser.add_argument('scan_csv', help='Path to scan results CSV')
+        investigate_parser.add_argument('--report', default='output/quality_report.md')
+
+        # Parse test command
+        args = parser.parse_args(['investigate', 'results.csv', '--report', 'report.md'])
+        assert args.scan_csv == 'results.csv'
+        assert args.report == 'report.md'

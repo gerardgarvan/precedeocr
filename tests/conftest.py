@@ -45,3 +45,20 @@ def sample_scan_csv(temp_dir):
         encoding='utf-8'
     )
     return str(csv_path)
+
+
+@pytest.fixture
+def sample_investigate_csv(temp_dir):
+    """Create sample CSV with error rows and no-match rows for investigate testing."""
+    csv_path = Path(temp_dir) / "results.csv"
+    csv_path.write_text(
+        "filename,folder_path,page,id,rotation_detected,notes\n"
+        "subdir1/fileA.pdf,subdir1,1,67890,90,\n"
+        "subdir2/fileB.pdf,subdir2,1,12345,0,\n"
+        "missing/file.pdf,,0,,0,error: FileNotFoundError: No such file\n"
+        "empty/file.pdf,,0,,0,error: EmptyFileError: File is empty\n"
+        "subdir1/fileA.pdf,subdir1,2,,None,\n"
+        "subdir2/fileB.pdf,subdir2,3,,None,\n",
+        encoding='utf-8'
+    )
+    return str(csv_path)
