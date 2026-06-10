@@ -1,22 +1,21 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.3
-milestone_name: Results Cleanup & ID Lookup
-status: roadmap_created
-last_updated: "2026-06-09"
-last_activity: 2026-06-09
+milestone_name: milestone
+status: completed
+last_updated: "2026-06-10T19:46:30.174Z"
 progress:
   total_phases: 4
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  completed_phases: 1
+  total_plans: 1
+  completed_plans: 1
+  percent: 100
 ---
 
 # Project State: Precede OCR v1.3 Results Cleanup & ID Lookup
 
-**Last updated:** 2026-06-09
-**Status:** Roadmap created, awaiting Phase 13 planning
+**Last updated:** 2026-06-10
+**Status:** Phase 13 Complete
 
 ---
 
@@ -26,22 +25,23 @@ progress:
 Reliably extract every Precede ID from every page across 30K+ PDFs so the user can look up which file and page any given ID lives in.
 
 **Current Focus:**
-Transform raw OCR scan output (52,055 IDs from 30,365 PDFs) into production-ready ID lookup system while investigating and resolving data quality issues.
+Phase 13 — cli-subcommand-foundation
 
 ---
 
 ## Current Position
 
+Phase: 13 (cli-subcommand-foundation) — COMPLETE
+Plan: 1 of 1 (all complete)
 **Milestone:** v1.3 Results Cleanup & ID Lookup
 **Phase:** 13 - CLI Subcommand Foundation
-**Plan:** Not started
-**Status:** Roadmap approved, awaiting planning
+**Plan:** 1 of 1 complete
+**Status:** Phase 13 complete, ready for Phase 14
 
-**Progress:** 0/4 phases complete
+**Progress:** [██████████] 100%
 
 ```
-[                                        ] 0%
-Phase 13 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 0/? plans
+Phase 13 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 plans COMPLETE
 ```
 
 ---
@@ -49,13 +49,15 @@ Phase 13 ━━━━━━━━━━━━━━━━━━━━━━━�
 ## Performance Metrics
 
 **Milestone v1.3:**
+
 - Phases planned: 4
-- Phases complete: 0
-- Plans executed: 0
+- Phases complete: 1
+- Plans executed: 1
 - Total requirements: 10
-- Requirements validated: 0
+- Requirements validated: 1 (LOOK-03)
 
 **Overall project:**
+
 - Total milestones: 3 (v1.0, v1.1, v1.2 shipped; v1.3 active)
 - Total phases completed: 12 (v1.0: 5, v1.1: 4, v1.2: 3)
 - Total plans executed: 31+ (v1.0: 10, v1.1: 9, v1.2: 12+)
@@ -81,7 +83,11 @@ Phase 13 ━━━━━━━━━━━━━━━━━━━━━━━�
 
 ### Key Decisions (v1.3)
 
-None yet — roadmap just created.
+| Decision | Phase | Rationale |
+|----------|-------|-----------|
+| Clean break: subcommand required (D-01) | Phase 13 | `python precede_ocr.py scan <dir>` replaces bare invocation |
+| main() unchanged, cmd_scan() wrapper (D-07) | Phase 13 | Preserves 236 test compatibility, thin Namespace unpacking |
+| Stub handlers with full arg definitions (D-05) | Phase 13 | Early CLI design validation via --help |
 
 ### Key Decisions (Previous Milestones)
 
@@ -96,6 +102,7 @@ None yet — roadmap just created.
 ### Known Issues
 
 **Production data quality (from v1.2 run):**
+
 1. **49 failed files:**
    - 46 FileNotFoundError (possible race condition or path issues)
    - 3 EmptyFileError (zero-byte PDFs)
@@ -110,36 +117,41 @@ None yet — roadmap just created.
    - Needs investigation to separate legitimate from artifacts
 
 **Research mitigation:**
+
 - Conservative deduplication (bias toward preservation)
 - Sample validation before full deployment
 - Raw data always preserved
 
 ### Active TODOs
 
-- [ ] Plan Phase 13 (CLI Subcommand Foundation)
-- [ ] Validate argparse subparser pattern against existing main()
-- [ ] Ensure backward compatibility with v1.2 scan command
+- [x] Plan Phase 13 (CLI Subcommand Foundation) -- COMPLETE
+- [x] Validate argparse subparser pattern against existing main() -- COMPLETE
+- [x] Ensure backward compatibility with v1.2 scan command -- COMPLETE (236 tests pass)
+- [ ] Execute Phase 14 (ID Lookup Generation)
+- [ ] Execute Phase 15 (Error Investigation)
+- [ ] Execute Phase 16 (Multi-ID Cleanup)
 
 ### Blockers
 
-None — roadmap complete, ready for Phase 13 planning.
+None -- Phase 13 complete, Phases 14-16 can proceed independently.
 
 ---
 
 ## Session Continuity
 
 **What just happened:**
-Roadmap created for milestone v1.3 with 4 phases derived from 10 requirements (LOOK-01/02/03, ERR-01/02/03/04, MULTI-01/02/03). Coverage validated at 100%. Phase numbering continues from v1.2's Phase 12, starting at Phase 13.
+Phase 13 (CLI Subcommand Foundation) completed. Refactored flat argparse CLI into subparser architecture with 4 subcommands: scan, lookup, investigate, clean-multi-ids. All 236 tests pass. LOOK-03 requirement validated.
 
 **What's next:**
-Run `/gsd:plan-phase 13` to decompose CLI Subcommand Foundation into executable plans.
+Execute Phase 14 (ID Lookup Generation), Phase 15 (Error Investigation), or Phase 16 (Multi-ID Cleanup). All three are independent and can proceed in any order.
 
 **Context to preserve:**
-- Research identified zero new dependencies needed (pandas + stdlib sufficient)
-- All phases use standard patterns, no deeper research required
-- Phase 13 is pure refactor (zero functional changes) to establish foundation
-- Phases 14-16 are independent after Phase 13 completes
-- Risk mitigation: sample validation, raw data preservation, conservative filters
+
+- CLI architecture uses set_defaults(func=cmd_xxx) dispatch pattern
+- cmd_scan() wraps main() with keyword arg unpacking -- main() unchanged
+- Stub handlers define full argument interfaces for --help discovery
+- Phases 14-16 replace stub handlers with real implementations
+- Zero new dependencies added in Phase 13
 
 ---
 
@@ -149,8 +161,8 @@ Run `/gsd:plan-phase 13` to decompose CLI Subcommand Foundation into executable 
 |--------|-------|
 | Milestone | v1.3 Results Cleanup & ID Lookup |
 | Phase | 13 / 16 |
-| Plans complete | 0 / ? |
-| Requirements | 10 total (0 validated) |
+| Plans complete | 1 / 1 (Phase 13) |
+| Requirements | 10 total (1 validated: LOOK-03) |
 | Test coverage | 236 tests passing (from v1.2) |
 | LOC | 5,471 Python (2,151 pipeline + 3,320 tests) |
 

@@ -8,7 +8,7 @@
 
 ## Phases
 
-- [ ] **Phase 13: CLI Subcommand Foundation** - Refactor main() to use argparse subparsers for scan/lookup/investigate/clean-multi-ids commands
+- [x] **Phase 13: CLI Subcommand Foundation** - Refactor main() to use argparse subparsers for scan/lookup/investigate/clean-multi-ids commands (completed 2026-06-10)
 - [ ] **Phase 14: ID Lookup Generation** - Generate sorted ID lookup CSV with Excel-compatible formatting
 - [ ] **Phase 15: Error Investigation & Reporting** - Investigate failed files and no-match pages, produce quality report
 - [ ] **Phase 16: Multi-ID Cleanup & Validation** - Analyze and clean multi-ID pages with conservative deduplication
@@ -26,10 +26,10 @@
   2. User can invoke `python precede_ocr.py --help` and see available subcommands (scan, lookup, investigate, clean-multi-ids)
   3. All 236 existing tests pass without modification
   4. Subcommand dispatcher routes to appropriate handler functions
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] 13-01-PLAN.md -- Add handler functions and subparser CLI architecture
+- [x] 13-01-PLAN.md -- Add handler functions and subparser CLI architecture
 
 ### Phase 14: ID Lookup Generation
 **Goal**: Users can generate a sorted, Excel-friendly ID lookup CSV from scan results
@@ -73,7 +73,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 13. CLI Subcommand Foundation | 0/1 | Planned | - |
+| 13. CLI Subcommand Foundation | 1/1 | Complete   | 2026-06-10 |
 | 14. ID Lookup Generation | 0/? | Not started | - |
 | 15. Error Investigation & Reporting | 0/? | Not started | - |
 | 16. Multi-ID Cleanup & Validation | 0/? | Not started | - |
