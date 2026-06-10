@@ -11,13 +11,14 @@ Reliably extract every Precede ID from every page across 30K+ PDFs so the user c
 ## Current State
 
 Shipped v1.2 Performance Optimization — 5,471 LOC Python (2,151 pipeline + 3,320 tests).
-236 tests passing. 100% accuracy on benchmark sample.
+259 tests passing. 100% accuracy on benchmark sample.
 Production run complete: 30,365 files processed in 1h40m, 52,055 IDs extracted, 49 failures, 59 no-match pages.
 Tech stack: Python 3, pytesseract, PyMuPDF (fitz), OpenCV, Pillow, pandas, scipy.
 
 CLI: `python precede_ocr.py scan <file_or_dir> --output-csv --output-json --workers N --debug --fresh`
-Subcommands: scan, lookup, investigate, clean-multi-ids (Phase 13 foundation — lookup implemented in Phase 14; investigate/clean-multi-ids are stubs pending Phases 15-16)
+Subcommands: scan, lookup, investigate, clean-multi-ids (Phase 13 foundation — lookup in Phase 14, investigate in Phase 15; clean-multi-ids stub pending Phase 16)
 Lookup: `python precede_ocr.py lookup results.csv --output output/lookup.csv` — generates sorted, Excel-compatible ID lookup CSV
+Investigate: `python precede_ocr.py investigate results.csv --report output/quality_report.md` — diagnoses failed files and no-match pages, produces quality report + CSV exports
 
 **Campaign features (v1.1):**
 - Interactive 6-option resume menu (continue, re-run failures, view stats, export partial, fresh start, quit)
@@ -68,10 +69,10 @@ Lookup: `python precede_ocr.py lookup results.csv --output output/lookup.csv` �
 ### Active
 
 - ✓ Generate ID lookup CSV sorted by ID (columns: ID, Filename, Page, Folder) — v1.3 Phase 14
-- [ ] Investigate and fix failed files (FileNotFoundError, EmptyFileError) — v1.3
-- [ ] Investigate and fix no-match pages (59 pages with no ID extracted) — v1.3
+- ✓ Investigate and fix failed files (FileNotFoundError, EmptyFileError) — v1.3 Phase 15
+- ✓ Investigate and fix no-match pages (59 pages with no ID extracted) — v1.3 Phase 15
 - [ ] Investigate multi-ID pages (5,141 pages) and clean up false positives — v1.3
-- [ ] Produce error/quality report documenting findings — v1.3
+- ✓ Produce error/quality report documenting findings — v1.3 Phase 15
 
 ### Out of Scope
 
@@ -145,4 +146,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-10 — Phase 14 (ID Lookup Generation) complete*
+*Last updated: 2026-06-10 — Phase 15 (Error Investigation & Reporting) complete*
