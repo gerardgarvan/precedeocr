@@ -41,7 +41,10 @@ Plans:
   3. Lookup CSV contains columns: ID, Filename, Page, Folder
   4. IDs are sorted numerically in ascending order
   5. Folder paths are correctly extracted from filenames
-**Plans**: TBD
+**Plans:** 1 plan
+
+Plans:
+- [ ] 14-01-PLAN.md -- TDD: Implement cmd_lookup with tests, filtering, sorting, and Excel-compatible CSV export
 
 ### Phase 15: Error Investigation & Reporting
 **Goal**: Users understand root causes of failed files and no-match pages with actionable recommendations
@@ -74,7 +77,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 13. CLI Subcommand Foundation | 1/1 | Complete    | 2026-06-10 |
-| 14. ID Lookup Generation | 0/? | Not started | - |
+| 14. ID Lookup Generation | 0/1 | Planned | - |
 | 15. Error Investigation & Reporting | 0/? | Not started | - |
 | 16. Multi-ID Cleanup & Validation | 0/? | Not started | - |
 
