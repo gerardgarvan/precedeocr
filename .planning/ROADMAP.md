@@ -81,7 +81,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 13. CLI Subcommand Foundation | 1/1 | Complete    | 2026-06-10 |
 | 14. ID Lookup Generation | 1/1 | Complete    | 2026-06-10 |
-| 15. Error Investigation & Reporting | 1/1 | Complete   | 2026-06-10 |
+| 15. Error Investigation & Reporting | 1/1 | Complete    | 2026-06-10 |
 | 16. Multi-ID Cleanup & Validation | 0/? | Not started | - |
 
 ---
