@@ -16,7 +16,8 @@ Production run complete: 30,365 files processed in 1h40m, 52,055 IDs extracted, 
 Tech stack: Python 3, pytesseract, PyMuPDF (fitz), OpenCV, Pillow, pandas, scipy.
 
 CLI: `python precede_ocr.py scan <file_or_dir> --output-csv --output-json --workers N --debug --fresh`
-Subcommands: scan, lookup, investigate, clean-multi-ids (Phase 13 — lookup/investigate/clean-multi-ids are stubs pending Phases 14-16)
+Subcommands: scan, lookup, investigate, clean-multi-ids (Phase 13 foundation — lookup implemented in Phase 14; investigate/clean-multi-ids are stubs pending Phases 15-16)
+Lookup: `python precede_ocr.py lookup results.csv --output output/lookup.csv` — generates sorted, Excel-compatible ID lookup CSV
 
 **Campaign features (v1.1):**
 - Interactive 6-option resume menu (continue, re-run failures, view stats, export partial, fresh start, quit)
@@ -66,7 +67,7 @@ Subcommands: scan, lookup, investigate, clean-multi-ids (Phase 13 — lookup/inv
 
 ### Active
 
-- [ ] Generate ID lookup CSV sorted by ID (columns: ID, Filename, Page, Folder) — v1.3
+- ✓ Generate ID lookup CSV sorted by ID (columns: ID, Filename, Page, Folder) — v1.3 Phase 14
 - [ ] Investigate and fix failed files (FileNotFoundError, EmptyFileError) — v1.3
 - [ ] Investigate and fix no-match pages (59 pages with no ID extracted) — v1.3
 - [ ] Investigate multi-ID pages (5,141 pages) and clean up false positives — v1.3
@@ -144,4 +145,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-09 — Milestone v1.3 started*
+*Last updated: 2026-06-10 — Phase 14 (ID Lookup Generation) complete*
