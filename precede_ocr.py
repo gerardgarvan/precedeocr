@@ -2225,10 +2225,272 @@ def cmd_lookup(args):
     print(f"Wrote {total_entries:,} entries ({unique_ids:,} unique IDs) from {files_covered:,} files to {output_path}")
 
 
+def is_blank_page(image, threshold=0.99):
+    """
+    Detect if image is predominantly blank using histogram analysis.
+
+    Per ERR-02: Distinguish blank white (scanning issue) from blank black (rendering issue).
+
+    Args:
+        image: PIL Image (RGB or L mode)
+        threshold: Fraction of pixels that must be uniform (default 0.99 = 99%)
+
+    Returns:
+        (is_blank, category) - (True, "blank_white"), (True, "blank_black"), or (False, "")
+    """
+    # Convert to grayscale for uniform analysis
+    if image.mode != 'L':
+        image = image.convert('L')
+
+    # Get pixel value histogram (256 bins for 0-255 range)
+    hist = image.histogram()
+    total_pixels = sum(hist)
+
+    # White detection: pixels in 250-255 range (near-white allows for compression artifacts)
+    white_pixels = sum(hist[250:256])
+    if white_pixels / total_pixels >= threshold:
+        return True, "blank_white"
+
+    # Black detection: pixels in 0-5 range (near-black)
+    black_pixels = sum(hist[0:6])
+    if black_pixels / total_pixels >= threshold:
+        return True, "blank_black"
+
+    return False, ""
+
+
+def investigate_failed_files(df):
+    """
+    Re-verify failed files and categorize errors.
+    Implements ERR-01.
+
+    Args:
+        df: pandas DataFrame with scan results
+
+    Returns:
+        DataFrame with columns [filename, error_type, file_exists_now, notes, recommendation]
+    """
+    # Filter to error rows (page=0, notes starts with "error:")
+    error_rows = df[
+        (df['page'] == 0) &
+        (df['notes'].astype(str).str.startswith('error:', na=False))
+    ].copy()
+
+    # Extract error type from notes using existing categorize_errors pattern
+    import re
+    error_pattern = re.compile(r'error:\s*(\w+):')
+
+    def extract_error_type(notes):
+        match = error_pattern.search(notes)
+        return match.group(1) if match else 'Unknown'
+
+    error_rows['error_type'] = error_rows['notes'].apply(extract_error_type)
+
+    # Re-verify file existence
+    def check_exists(filename):
+        return Path(filename).exists()
+
+    error_rows['file_exists_now'] = error_rows['filename'].apply(check_exists)
+
+    # Add recommendation column
+    def get_recommendation(row):
+        if row['error_type'] == 'FileNotFoundError' and row['file_exists_now']:
+            return "File now exists -- rescan with: python precede_ocr.py scan '{}'".format(row['filename'])
+        elif row['error_type'] == 'FileNotFoundError' and not row['file_exists_now']:
+            return 'File still missing -- verify source path'
+        elif row['error_type'] == 'EmptyFileError':
+            return 'Zero-byte PDF -- verify file integrity at source'
+        else:
+            return 'Manual investigation required'
+
+    error_rows['recommendation'] = error_rows.apply(get_recommendation, axis=1)
+
+    return error_rows[['filename', 'error_type', 'file_exists_now', 'notes', 'recommendation']]
+
+
+def investigate_no_match_pages(df):
+    """
+    Re-render and analyze no-match pages.
+    Implements ERR-02 with D-01 and D-02 decisions.
+
+    Args:
+        df: pandas DataFrame with scan results
+
+    Returns:
+        DataFrame with columns [filename, page, category, ocr_sample, recommendation]
+    """
+    import fitz
+    import pytesseract
+
+    # Filter to no-match rows (page>0, no ID, not error)
+    no_match_rows = df[
+        (df['page'] > 0) &
+        (df['id'].isna() | (df['id'] == '')) &
+        ~df['notes'].astype(str).str.startswith('error:', na=False)
+    ].copy()
+
+    def diagnose_page(row):
+        """Re-render page and categorize failure."""
+        pdf_path = row['filename']
+        page_num = int(row['page'])
+
+        try:
+            # Re-render page at DPI 200 (D-01)
+            doc = fitz.open(pdf_path)
+            page = doc[page_num - 1]  # Convert 1-indexed to 0-indexed
+            pix = page.get_pixmap(dpi=200, alpha=False)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            doc.close()
+
+            # Check if blank (D-02 quick scan)
+            is_blank, blank_type = is_blank_page(img)
+            if is_blank:
+                return blank_type, "", "Blank page -- verify source document"
+
+            # Single OCR pass for text capture (D-02)
+            config = '--psm 6 --oem 1 -c tessedit_char_whitelist=0123456789 -c load_system_dawg=false -c load_freq_dawg=false'
+            text = pytesseract.image_to_string(img, config=config).strip()
+
+            if not text:
+                return "no_text_detected", "", "OCR found no text -- check image quality"
+            elif len(text) < 5 or not any(c.isdigit() for c in text):
+                return "insufficient_text", text[:50], "OCR found text but no valid digits"
+            else:
+                return "text_no_id_match", text[:50], "OCR found digits but no 5-digit ID pattern"
+
+        except Exception as e:
+            return "investigation_failed", "", f"Could not re-render: {type(e).__name__}: {e}"
+
+    # Apply diagnosis to each row
+    no_match_rows[['category', 'ocr_sample', 'recommendation']] = no_match_rows.apply(
+        lambda row: pd.Series(diagnose_page(row)), axis=1
+    )
+
+    return no_match_rows[['filename', 'page', 'category', 'ocr_sample', 'recommendation']]
+
+
+def generate_investigation_report(failed_df, no_match_df, scan_csv_path):
+    """
+    Generate markdown investigation report per ERR-04.
+
+    Per D-04: Include copy-paste CLI commands for fixable errors.
+
+    Args:
+        failed_df: DataFrame from investigate_failed_files()
+        no_match_df: DataFrame from investigate_no_match_pages()
+        scan_csv_path: Path to scan CSV (for report header)
+
+    Returns:
+        String containing markdown report
+    """
+    from datetime import datetime
+
+    sections = []
+
+    # Header
+    sections.append("# Error Investigation Report\n\n")
+    sections.append(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    sections.append(f"**Scan CSV:** {scan_csv_path}\n\n")
+
+    # Summary
+    sections.append("## Summary\n\n")
+    sections.append(f"- Failed files: {len(failed_df)}\n")
+    sections.append(f"- No-match pages: {len(no_match_df)}\n\n")
+
+    # Failed Files Section
+    if not failed_df.empty:
+        sections.append("## Failed Files Analysis\n\n")
+
+        # Category breakdown
+        error_counts = failed_df['error_type'].value_counts()
+        sections.append("### Error Type Breakdown\n\n")
+        for error_type, count in error_counts.items():
+            sections.append(f"- **{error_type}**: {count} files\n")
+        sections.append("\n")
+
+        # Full table (pandas to_markdown)
+        sections.append("### Detailed Findings\n\n")
+        sections.append(failed_df.to_markdown(index=False))
+        sections.append("\n\n")
+
+        # Fixable errors (D-04 copy-paste commands)
+        fixable = failed_df[
+            (failed_df['error_type'] == 'FileNotFoundError') &
+            (failed_df['file_exists_now'] == True)
+        ]
+        if not fixable.empty:
+            sections.append("### Fixable Errors (Files Now Exist)\n\n")
+            sections.append("```bash\n")
+            for filename in fixable['filename'].unique():
+                sections.append(f"python precede_ocr.py scan '{filename}'\n")
+            sections.append("```\n\n")
+
+    # No-Match Pages Section
+    if not no_match_df.empty:
+        sections.append("## No-Match Pages Analysis\n\n")
+
+        # Category breakdown
+        category_counts = no_match_df['category'].value_counts()
+        sections.append("### Category Breakdown\n\n")
+        for category, count in category_counts.items():
+            sections.append(f"- **{category}**: {count} pages\n")
+        sections.append("\n")
+
+        # Full table
+        sections.append("### Detailed Findings\n\n")
+        sections.append(no_match_df.to_markdown(index=False))
+        sections.append("\n\n")
+
+    return "".join(sections)
+
+
 def cmd_investigate(args):
-    """Handler for investigate subcommand. Stub for Phase 15 implementation."""
-    print("investigate command not yet implemented. Coming in a future update.")
-    sys.exit(1)
+    """Handler for investigate subcommand. Implements ERR-01 through ERR-04."""
+    scan_csv_path = Path(args.scan_csv)
+    report_path = Path(args.report)
+
+    # Validate input file exists
+    if not scan_csv_path.exists():
+        print(f"Error: Scan CSV not found: {scan_csv_path}")
+        sys.exit(1)
+
+    # Read CSV
+    try:
+        df = pd.read_csv(scan_csv_path)
+    except Exception as e:
+        print(f"Error reading CSV: {e}")
+        sys.exit(1)
+
+    # Validate columns
+    required_cols = {'filename', 'page', 'id', 'notes'}
+    if not required_cols.issubset(set(df.columns)):
+        missing = required_cols - set(df.columns)
+        print(f"Error: CSV missing required columns: {missing}")
+        sys.exit(1)
+
+    # Investigate failed files and no-match pages
+    failed_df = investigate_failed_files(df)
+    no_match_df = investigate_no_match_pages(df)
+
+    # Generate report
+    report_content = generate_investigation_report(failed_df, no_match_df, scan_csv_path)
+
+    # Write outputs
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(report_content, encoding='utf-8')
+
+    # Write CSV exports
+    no_match_csv = report_path.parent / 'no_match_pages.csv'
+    failed_csv = report_path.parent / 'failed_files.csv'
+
+    no_match_df.to_csv(no_match_csv, index=False, encoding='utf-8-sig', quoting=csv.QUOTE_NONNUMERIC)
+    failed_df.to_csv(failed_csv, index=False, encoding='utf-8-sig', quoting=csv.QUOTE_NONNUMERIC)
+
+    # Print summary
+    print(f"Investigation complete.")
+    print(f"  Report: {report_path}")
+    print(f"  Failed files: {failed_csv}")
+    print(f"  No-match pages: {no_match_csv}")
 
 
 def cmd_clean_multi_ids(args):
@@ -2293,6 +2555,10 @@ if __name__ == '__main__':
     investigate_parser = subparsers.add_parser(
         'investigate',
         help='Investigate failed files and no-match pages'
+    )
+    investigate_parser.add_argument(
+        'scan_csv',
+        help='Path to scan results CSV'
     )
     investigate_parser.add_argument(
         '--report', default='output/quality_report.md',

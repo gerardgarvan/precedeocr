@@ -3779,7 +3779,7 @@ class TestInvestigateCommand:
              'notes': 'error: FileNotFoundError: No such file'},
         ])
         result = investigate_failed_files(df)
-        assert result['file_exists_now'].iloc[0] is True
+        assert result['file_exists_now'].iloc[0] == True
         assert 'rescan' in result['recommendation'].iloc[0].lower()
 
     def test_investigate_no_match_pages_categorization(self, temp_dir):
