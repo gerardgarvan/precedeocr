@@ -54,6 +54,12 @@ try:
 except ImportError:
     compute_folder_stats_from_results = None
 
+# Phase 14 imports (available after Phase 14 implements cmd_lookup)
+try:
+    from precede_ocr import cmd_lookup
+except ImportError:
+    cmd_lookup = None
+
 import time as time_module
 import re
 from dataclasses import asdict
@@ -3525,3 +3531,166 @@ class TestPhase12Enhancements:
         assert len(results) == 1
         assert results[0]['ids'] == []
         assert results[0]['notes'] == 'no_digits'
+
+
+# -- cmd_lookup tests (Phase 14) --
+
+class TestCmdLookup:
+    """Tests for lookup subcommand (LOOK-01, LOOK-02)."""
+
+    def _make_args(self, scan_csv, output):
+        """Create mock argparse Namespace for cmd_lookup."""
+        from argparse import Namespace
+        return Namespace(scan_csv=scan_csv, output=output)
+
+    def test_cmd_lookup_basic(self, sample_scan_csv, temp_dir):
+        """LOOK-01: Output CSV has columns ID, Filename, Page, Folder with valid rows only."""
+        output_path = str(Path(temp_dir) / "lookup.csv")
+        args = self._make_args(sample_scan_csv, output_path)
+        cmd_lookup(args)
+
+        import pandas as pd
+        df = pd.read_csv(output_path)
+        assert list(df.columns) == ['ID', 'Filename', 'Page', 'Folder']
+        assert len(df) == 3  # 3 valid ID rows (blank + error filtered out)
+
+    def test_cmd_lookup_numeric_sort(self, temp_dir):
+        """LOOK-01: IDs sorted numerically, not lexicographically."""
+        csv_path = Path(temp_dir) / "results.csv"
+        csv_path.write_text(
+            "filename,folder_path,page,id,rotation_detected,notes\n"
+            "f.pdf,,1,10234,0,\n"
+            "f.pdf,,2,9876,0,\n",
+            encoding='utf-8'
+        )
+        output_path = str(Path(temp_dir) / "lookup.csv")
+        args = self._make_args(str(csv_path), output_path)
+        cmd_lookup(args)
+
+        import pandas as pd
+        df = pd.read_csv(output_path, dtype={'ID': str})
+        ids = df['ID'].tolist()
+        assert ids == ['9876', '10234']
+
+    def test_cmd_lookup_filter_blanks(self, temp_dir):
+        """D-01: Rows with blank IDs excluded."""
+        csv_path = Path(temp_dir) / "results.csv"
+        csv_path.write_text(
+            "filename,folder_path,page,id,rotation_detected,notes\n"
+            "f.pdf,,1,12345,0,\n"
+            "f.pdf,,2,,None,no_text_detected\n"
+            "f.pdf,,3,67890,0,\n",
+            encoding='utf-8'
+        )
+        output_path = str(Path(temp_dir) / "lookup.csv")
+        args = self._make_args(str(csv_path), output_path)
+        cmd_lookup(args)
+
+        import pandas as pd
+        df = pd.read_csv(output_path)
+        assert len(df) == 2
+
+    def test_cmd_lookup_filter_errors(self, temp_dir):
+        """D-02: Error rows (page=0, notes starting with 'error:') excluded."""
+        csv_path = Path(temp_dir) / "results.csv"
+        csv_path.write_text(
+            "filename,folder_path,page,id,rotation_detected,notes\n"
+            "f.pdf,,1,12345,0,\n"
+            "f.pdf,,0,0,0,error: FileNotFoundError\n"
+            "f.pdf,,2,67890,0,\n",
+            encoding='utf-8'
+        )
+        output_path = str(Path(temp_dir) / "lookup.csv")
+        args = self._make_args(str(csv_path), output_path)
+        cmd_lookup(args)
+
+        import pandas as pd
+        df = pd.read_csv(output_path)
+        assert len(df) == 2
+        assert 0 not in df['Page'].values
+
+    def test_cmd_lookup_keep_duplicates(self, temp_dir):
+        """D-03: Duplicate IDs across pages are preserved."""
+        csv_path = Path(temp_dir) / "results.csv"
+        csv_path.write_text(
+            "filename,folder_path,page,id,rotation_detected,notes\n"
+            "f.pdf,,1,12345,0,\n"
+            "g.pdf,,3,12345,90,\n",
+            encoding='utf-8'
+        )
+        output_path = str(Path(temp_dir) / "lookup.csv")
+        args = self._make_args(str(csv_path), output_path)
+        cmd_lookup(args)
+
+        import pandas as pd
+        df = pd.read_csv(output_path, dtype={'ID': str})
+        assert len(df) == 2
+        assert df['ID'].tolist() == ['12345', '12345']
+
+    def test_cmd_lookup_legacy_csv(self, temp_dir):
+        """D-04: CSV without folder_path column still produces Folder from filename."""
+        csv_path = Path(temp_dir) / "results.csv"
+        csv_path.write_text(
+            "filename,page,id,rotation_detected,notes\n"
+            "subdir1/fileA.pdf,1,12345,0,\n",
+            encoding='utf-8'
+        )
+        output_path = str(Path(temp_dir) / "lookup.csv")
+        args = self._make_args(str(csv_path), output_path)
+        cmd_lookup(args)
+
+        import pandas as pd
+        df = pd.read_csv(output_path)
+        assert 'Folder' in df.columns
+        assert df['Folder'].iloc[0] == 'subdir1'
+
+    def test_cmd_lookup_summary(self, sample_scan_csv, temp_dir, capsys):
+        """D-05: Summary stats printed to stdout."""
+        output_path = str(Path(temp_dir) / "lookup.csv")
+        args = self._make_args(sample_scan_csv, output_path)
+        cmd_lookup(args)
+
+        captured = capsys.readouterr()
+        assert 'entries' in captured.out
+        assert 'unique IDs' in captured.out
+        assert 'files' in captured.out
+
+    def test_cmd_lookup_utf8_bom(self, sample_scan_csv, temp_dir):
+        """LOOK-02: Output CSV starts with UTF-8 BOM bytes."""
+        output_path = str(Path(temp_dir) / "lookup.csv")
+        args = self._make_args(sample_scan_csv, output_path)
+        cmd_lookup(args)
+
+        with open(output_path, 'rb') as f:
+            bom = f.read(3)
+        assert bom == b'\xef\xbb\xbf', f"Expected UTF-8 BOM, got {bom!r}"
+
+    def test_cmd_lookup_quoting(self, sample_scan_csv, temp_dir):
+        """LOOK-02: ID values are quoted to prevent Excel date conversion."""
+        output_path = str(Path(temp_dir) / "lookup.csv")
+        args = self._make_args(sample_scan_csv, output_path)
+        cmd_lookup(args)
+
+        with open(output_path, 'r', encoding='utf-8-sig') as f:
+            content = f.read()
+        # QUOTE_NONNUMERIC quotes all non-numeric fields (strings)
+        # After converting ID back to str, it should be quoted
+        assert '"12345"' in content or '"67890"' in content
+
+    def test_cmd_lookup_missing_file(self, temp_dir):
+        """Error handling: nonexistent scan CSV exits with code 1."""
+        output_path = str(Path(temp_dir) / "lookup.csv")
+        args = self._make_args(str(Path(temp_dir) / "nonexistent.csv"), output_path)
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_lookup(args)
+        assert exc_info.value.code == 1
+
+    def test_cmd_lookup_missing_columns(self, temp_dir):
+        """Error handling: CSV missing required columns exits with code 1."""
+        csv_path = Path(temp_dir) / "bad.csv"
+        csv_path.write_text("col1,col2\na,b\n", encoding='utf-8')
+        output_path = str(Path(temp_dir) / "lookup.csv")
+        args = self._make_args(str(csv_path), output_path)
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_lookup(args)
+        assert exc_info.value.code == 1
