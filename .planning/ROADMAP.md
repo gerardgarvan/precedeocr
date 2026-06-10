@@ -26,7 +26,10 @@
   2. User can invoke `python precede_ocr.py --help` and see available subcommands (scan, lookup, investigate, clean-multi-ids)
   3. All 236 existing tests pass without modification
   4. Subcommand dispatcher routes to appropriate handler functions
-**Plans**: TBD
+**Plans:** 1 plan
+
+Plans:
+- [ ] 13-01-PLAN.md -- Add handler functions and subparser CLI architecture
 
 ### Phase 14: ID Lookup Generation
 **Goal**: Users can generate a sorted, Excel-friendly ID lookup CSV from scan results
@@ -70,7 +73,7 @@
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 13. CLI Subcommand Foundation | 0/? | Not started | - |
+| 13. CLI Subcommand Foundation | 0/1 | Planned | - |
 | 14. ID Lookup Generation | 0/? | Not started | - |
 | 15. Error Investigation & Reporting | 0/? | Not started | - |
 | 16. Multi-ID Cleanup & Validation | 0/? | Not started | - |
@@ -95,19 +98,19 @@
 ## Notes
 
 **Phase ordering rationale:**
-- Phase 13 (CLI refactor) is foundation for all other phases — must come first
+- Phase 13 (CLI refactor) is foundation for all other phases -- must come first
 - Phases 14-16 are independent after Phase 13 completes
-- Ordered by value/risk ratio: lookup (high value, zero risk) → investigate (medium value, zero risk) → multi-ID (high value, low risk with validation)
+- Ordered by value/risk ratio: lookup (high value, zero risk) -> investigate (medium value, zero risk) -> multi-ID (high value, low risk with validation)
 
 **Research flags:**
 - All phases use standard patterns (argparse subparsers, pandas CSV operations, error categorization)
-- No phases require deeper research — all techniques identified in project research
+- No phases require deeper research -- all techniques identified in project research
 
 **Risk mitigation:**
 - Phase 13: Pure refactor with test validation minimizes risk
-- Phase 14: Zero risk — reads existing CSV, creates new file
-- Phase 15: Zero risk — reads checkpoint, writes reports
+- Phase 14: Zero risk -- reads existing CSV, creates new file
+- Phase 15: Zero risk -- reads checkpoint, writes reports
 - Phase 16: Conservative approach (exact-match dedup, sample validation) prevents overzealous filtering
 
 ---
-*Last updated: 2026-06-09*
+*Last updated: 2026-06-10*
