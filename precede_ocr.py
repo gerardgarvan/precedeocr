@@ -8,6 +8,7 @@ Outputs structured CSV and JSON mapping each ID to its source filename and page 
 
 import re
 import sys
+import csv
 import json
 import argparse
 import signal
@@ -2156,9 +2157,72 @@ def cmd_scan(args):
 
 
 def cmd_lookup(args):
-    """Handler for lookup subcommand. Stub for Phase 14 implementation."""
-    print("lookup command not yet implemented. Coming in a future update.")
-    sys.exit(1)
+    """
+    Generate sorted ID lookup CSV from scan results.
+
+    Implements LOOK-01 (columns/sorting) and LOOK-02 (Excel compatibility).
+    Follows D-01 through D-05 decisions from Phase 14 CONTEXT.md.
+    """
+    scan_csv_path = Path(args.scan_csv)
+    output_path = Path(args.output)
+
+    # Validate input file exists
+    if not scan_csv_path.exists():
+        print(f"Error: Scan CSV not found: {scan_csv_path}")
+        sys.exit(1)
+
+    # Read scan CSV
+    try:
+        df = pd.read_csv(scan_csv_path)
+    except Exception as e:
+        print(f"Error reading CSV: {e}")
+        sys.exit(1)
+
+    # Validate expected columns
+    required_cols = {'filename', 'page', 'id', 'notes'}
+    if not required_cols.issubset(set(df.columns)):
+        missing = required_cols - set(df.columns)
+        print(f"Error: CSV missing required columns: {missing}")
+        sys.exit(1)
+
+    # D-01: Exclude blank IDs (no-match pages)
+    df = df[df['id'].notna() & (df['id'] != '')]
+
+    # D-02: Exclude error rows (page=0 or notes starting with "error:")
+    df = df[df['page'] != 0]
+    df = df[~df['notes'].astype(str).str.startswith('error:', na=False)]
+
+    # D-04: Handle folder_path column (present in new format, missing in old)
+    if 'folder_path' in df.columns:
+        df_lookup = df[['id', 'filename', 'page', 'folder_path']].copy()
+    else:
+        df_lookup = df[['id', 'filename', 'page']].copy()
+        df_lookup['folder_path'] = df['filename'].apply(
+            lambda fname: str(Path(fname).parent) if str(Path(fname).parent) != '.' else ''
+        )
+
+    # Rename columns per LOOK-01: ID, Filename, Page, Folder
+    df_lookup.columns = ['ID', 'Filename', 'Page', 'Folder']
+
+    # LOOK-01: Sort numerically by ID
+    df_lookup['ID'] = pd.to_numeric(df_lookup['ID'], errors='coerce')
+    df_lookup = df_lookup.sort_values(by='ID', ascending=True, na_position='last')
+    df_lookup['ID'] = df_lookup['ID'].astype(int).astype(str)
+
+    # LOOK-02: Write Excel-compatible CSV with UTF-8 BOM and quoting
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    df_lookup.to_csv(
+        output_path,
+        index=False,
+        encoding='utf-8-sig',
+        quoting=csv.QUOTE_NONNUMERIC,
+    )
+
+    # D-05: Print summary stats
+    total_entries = len(df_lookup)
+    unique_ids = df_lookup['ID'].nunique()
+    files_covered = df_lookup['Filename'].nunique()
+    print(f"Wrote {total_entries:,} entries ({unique_ids:,} unique IDs) from {files_covered:,} files to {output_path}")
 
 
 def cmd_investigate(args):
