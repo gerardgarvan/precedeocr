@@ -15,7 +15,8 @@ Shipped v1.2 Performance Optimization — 5,471 LOC Python (2,151 pipeline + 3,3
 Production run complete: 30,365 files processed in 1h40m, 52,055 IDs extracted, 49 failures, 59 no-match pages.
 Tech stack: Python 3, pytesseract, PyMuPDF (fitz), OpenCV, Pillow, pandas, scipy.
 
-CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N --debug --fresh`
+CLI: `python precede_ocr.py scan <file_or_dir> --output-csv --output-json --workers N --debug --fresh`
+Subcommands: scan, lookup, investigate, clean-multi-ids (Phase 13 — lookup/investigate/clean-multi-ids are stubs pending Phases 14-16)
 
 **Campaign features (v1.1):**
 - Interactive 6-option resume menu (continue, re-run failures, view stats, export partial, fresh start, quit)
@@ -123,6 +124,7 @@ CLI: `python precede_ocr.py <file_or_dir> --output-csv --output-json --workers N
 | PyMuPDF replaces pdf2image/Poppler | 2-12x faster rendering, in-memory pixmaps, no Poppler binary dependency | ✓ Good — Phase 10, simpler code (-37 lines) |
 | DPI 200 (down from 300) | Benchmarked 43% faster, found more IDs (211 vs 186 on 100-PDF sample) | ✓ Good — Phase 10 benchmark validated |
 | 16 workers hard-coded default | Benchmarked optimal for 20-core hybrid CPU (8P+12E); 16-20 nearly identical | ✓ Good — Phase 10, --workers override preserved |
+| Subcommand CLI architecture (argparse subparsers) | Enables lookup/investigate/clean-multi-ids as separate commands; scan wraps main() unchanged | ✓ Good — Phase 13, clean extension points for Phases 14-16 |
 
 ## Evolution
 
