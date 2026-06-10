@@ -10,8 +10,8 @@
 
 ### ID Lookup (LOOK)
 
-- [ ] **LOOK-01**: User can generate an ID lookup CSV sorted by ID number with columns: ID, Filename, Page, Folder
-- [ ] **LOOK-02**: Lookup CSV opens correctly in Excel (UTF-8 BOM encoding, proper quoting, IDs not interpreted as dates)
+- [x] **LOOK-01**: User can generate an ID lookup CSV sorted by ID number with columns: ID, Filename, Page, Folder
+- [x] **LOOK-02**: Lookup CSV opens correctly in Excel (UTF-8 BOM encoding, proper quoting, IDs not interpreted as dates)
 - [x] **LOOK-03**: User can run `python precede_ocr.py lookup <scan.csv>` as a CLI subcommand
 
 ### Error Investigation (ERR)
@@ -52,8 +52,8 @@
 
 | REQ-ID | Phase | Status |
 |--------|-------|--------|
-| LOOK-01 | Phase 14 | Pending |
-| LOOK-02 | Phase 14 | Pending |
+| LOOK-01 | Phase 14 | Complete |
+| LOOK-02 | Phase 14 | Complete |
 | LOOK-03 | Phase 13 | Complete |
 | ERR-01 | Phase 15 | Pending |
 | ERR-02 | Phase 15 | Pending |

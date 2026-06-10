@@ -9,7 +9,7 @@
 ## Phases
 
 - [x] **Phase 13: CLI Subcommand Foundation** - Refactor main() to use argparse subparsers for scan/lookup/investigate/clean-multi-ids commands (completed 2026-06-10)
-- [ ] **Phase 14: ID Lookup Generation** - Generate sorted ID lookup CSV with Excel-compatible formatting
+- [x] **Phase 14: ID Lookup Generation** - Generate sorted ID lookup CSV with Excel-compatible formatting (completed 2026-06-10)
 - [ ] **Phase 15: Error Investigation & Reporting** - Investigate failed files and no-match pages, produce quality report
 - [ ] **Phase 16: Multi-ID Cleanup & Validation** - Analyze and clean multi-ID pages with conservative deduplication
 
@@ -41,10 +41,10 @@ Plans:
   3. Lookup CSV contains columns: ID, Filename, Page, Folder
   4. IDs are sorted numerically in ascending order
   5. Folder paths are correctly extracted from filenames
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] 14-01-PLAN.md -- TDD: Implement cmd_lookup with tests, filtering, sorting, and Excel-compatible CSV export
+- [x] 14-01-PLAN.md -- TDD: Implement cmd_lookup with tests, filtering, sorting, and Excel-compatible CSV export
 
 ### Phase 15: Error Investigation & Reporting
 **Goal**: Users understand root causes of failed files and no-match pages with actionable recommendations
@@ -77,7 +77,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 13. CLI Subcommand Foundation | 1/1 | Complete    | 2026-06-10 |
-| 14. ID Lookup Generation | 0/1 | Planned | - |
+| 14. ID Lookup Generation | 1/1 | Complete   | 2026-06-10 |
 | 15. Error Investigation & Reporting | 0/? | Not started | - |
 | 16. Multi-ID Cleanup & Validation | 0/? | Not started | - |
 

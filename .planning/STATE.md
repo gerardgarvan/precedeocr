@@ -2,20 +2,20 @@
 gsd_state_version: 1.0
 milestone: v1.3
 milestone_name: milestone
-status: planning
-last_updated: "2026-06-10T19:51:40.191Z"
+status: executing
+last_updated: "2026-06-10T22:20:40Z"
 progress:
   total_phases: 4
-  completed_phases: 1
-  total_plans: 1
-  completed_plans: 1
+  completed_phases: 2
+  total_plans: 2
+  completed_plans: 2
   percent: 100
 ---
 
 # Project State: Precede OCR v1.3 Results Cleanup & ID Lookup
 
 **Last updated:** 2026-06-10
-**Status:** Ready to plan
+**Status:** Phase 14 Complete
 
 ---
 
@@ -25,23 +25,24 @@ progress:
 Reliably extract every Precede ID from every page across 30K+ PDFs so the user can look up which file and page any given ID lives in.
 
 **Current Focus:**
-Phase 13 — cli-subcommand-foundation
+Phase 14 — id-lookup-generation
 
 ---
 
 ## Current Position
 
-Phase: 13 (cli-subcommand-foundation) — COMPLETE
-Plan: 1 of 1 (all complete)
+Phase: 14 (id-lookup-generation) — COMPLETE
+Plan: 1 of 1 -- DONE
 **Milestone:** v1.3 Results Cleanup & ID Lookup
 **Phase:** 14
-**Plan:** Not started
-**Status:** Phase 13 complete, ready for Phase 14
+**Plan:** 1 of 1 COMPLETE
+**Status:** Phase 14 complete, ready for Phase 15/16
 
 **Progress:** [██████████] 100%
 
 ```
 Phase 13 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 plans COMPLETE
+Phase 14 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 plans COMPLETE
 ```
 
 ---
@@ -51,17 +52,17 @@ Phase 13 ━━━━━━━━━━━━━━━━━━━━━━━�
 **Milestone v1.3:**
 
 - Phases planned: 4
-- Phases complete: 1
-- Plans executed: 1
+- Phases complete: 2
+- Plans executed: 2
 - Total requirements: 10
-- Requirements validated: 1 (LOOK-03)
+- Requirements validated: 3 (LOOK-01, LOOK-02, LOOK-03)
 
 **Overall project:**
 
 - Total milestones: 3 (v1.0, v1.1, v1.2 shipped; v1.3 active)
 - Total phases completed: 12 (v1.0: 5, v1.1: 4, v1.2: 3)
 - Total plans executed: 31+ (v1.0: 10, v1.1: 9, v1.2: 12+)
-- Total tests: 236 passing
+- Total tests: 247 passing
 
 ---
 
@@ -88,6 +89,9 @@ Phase 13 ━━━━━━━━━━━━━━━━━━━━━━━�
 | Clean break: subcommand required (D-01) | Phase 13 | `python precede_ocr.py scan <dir>` replaces bare invocation |
 | main() unchanged, cmd_scan() wrapper (D-07) | Phase 13 | Preserves 236 test compatibility, thin Namespace unpacking |
 | Stub handlers with full arg definitions (D-05) | Phase 13 | Early CLI design validation via --help |
+| csv.QUOTE_NONNUMERIC for Excel ID protection | Phase 14 | Prevents Excel auto-converting numeric IDs to dates |
+| UTF-8 BOM (utf-8-sig) for Excel compatibility | Phase 14 | Excel requires BOM to auto-detect UTF-8 encoding |
+| pd.to_numeric + astype(int).astype(str) for sorting | Phase 14 | Robust numeric sort that handles edge cases cleanly |
 
 ### Key Decisions (Previous Milestones)
 
@@ -127,7 +131,7 @@ Phase 13 ━━━━━━━━━━━━━━━━━━━━━━━�
 - [x] Plan Phase 13 (CLI Subcommand Foundation) -- COMPLETE
 - [x] Validate argparse subparser pattern against existing main() -- COMPLETE
 - [x] Ensure backward compatibility with v1.2 scan command -- COMPLETE (236 tests pass)
-- [ ] Execute Phase 14 (ID Lookup Generation)
+- [x] Execute Phase 14 (ID Lookup Generation) -- COMPLETE (247 tests pass)
 - [ ] Execute Phase 15 (Error Investigation)
 - [ ] Execute Phase 16 (Multi-ID Cleanup)
 
@@ -140,18 +144,18 @@ None -- Phase 13 complete, Phases 14-16 can proceed independently.
 ## Session Continuity
 
 **What just happened:**
-Phase 13 (CLI Subcommand Foundation) completed. Refactored flat argparse CLI into subparser architecture with 4 subcommands: scan, lookup, investigate, clean-multi-ids. All 236 tests pass. LOOK-03 requirement validated.
+Phase 14 (ID Lookup Generation) completed. Implemented cmd_lookup() replacing stub with full ID lookup CSV generation. 11 new tests added via TDD. All 247 tests pass. LOOK-01 and LOOK-02 requirements validated.
 
 **What's next:**
-Execute Phase 14 (ID Lookup Generation), Phase 15 (Error Investigation), or Phase 16 (Multi-ID Cleanup). All three are independent and can proceed in any order.
+Execute Phase 15 (Error Investigation) and Phase 16 (Multi-ID Cleanup). Both are independent and can proceed in any order.
 
 **Context to preserve:**
 
-- CLI architecture uses set_defaults(func=cmd_xxx) dispatch pattern
-- cmd_scan() wraps main() with keyword arg unpacking -- main() unchanged
-- Stub handlers define full argument interfaces for --help discovery
-- Phases 14-16 replace stub handlers with real implementations
-- Zero new dependencies added in Phase 13
+- cmd_lookup() reads scan CSV, filters blanks/errors, sorts by ID numerically, writes Excel-compatible CSV
+- Output columns: ID, Filename, Page, Folder (utf-8-sig encoding, QUOTE_NONNUMERIC quoting)
+- Legacy CSV support: folder_path column extracted from filename if missing
+- CLI: `python precede_ocr.py lookup results.csv --output lookup.csv`
+- Phases 15-16 still have stub handlers to replace
 
 ---
 
@@ -160,11 +164,11 @@ Execute Phase 14 (ID Lookup Generation), Phase 15 (Error Investigation), or Phas
 | Metric | Value |
 |--------|-------|
 | Milestone | v1.3 Results Cleanup & ID Lookup |
-| Phase | 13 / 16 |
-| Plans complete | 1 / 1 (Phase 13) |
-| Requirements | 10 total (1 validated: LOOK-03) |
-| Test coverage | 236 tests passing (from v1.2) |
-| LOC | 5,471 Python (2,151 pipeline + 3,320 tests) |
+| Phase | 14 / 16 |
+| Plans complete | 2 / 2 (Phase 13 + Phase 14) |
+| Requirements | 10 total (3 validated: LOOK-01, LOOK-02, LOOK-03) |
+| Test coverage | 247 tests passing |
+| LOC | ~5,640 Python (~2,220 pipeline + ~3,420 tests) |
 
 ---
 *This file is the source of truth for project state. Update after each phase transition.*
