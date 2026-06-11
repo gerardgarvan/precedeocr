@@ -11,7 +11,7 @@
 - [x] **Phase 13: CLI Subcommand Foundation** - Refactor main() to use argparse subparsers for scan/lookup/investigate/clean-multi-ids commands (completed 2026-06-10)
 - [x] **Phase 14: ID Lookup Generation** - Generate sorted ID lookup CSV with Excel-compatible formatting (completed 2026-06-10)
 - [x] **Phase 15: Error Investigation & Reporting** - Investigate failed files and no-match pages, produce quality report (completed 2026-06-10)
-- [ ] **Phase 16: Multi-ID Cleanup & Validation** - Analyze and clean multi-ID pages with conservative deduplication
+- [x] **Phase 16: Multi-ID Cleanup & Validation** - Analyze and clean multi-ID pages with conservative deduplication (completed 2026-06-11)
 
 ---
 
@@ -71,11 +71,11 @@ Plans:
   3. Deduplication preserves legitimate sequential IDs while removing OCR artifacts
   4. Raw data is always preserved (original results.csv untouched)
   5. Cleanup report documents heuristics applied, IDs removed, and confidence metrics
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 
 Plans:
 - [x] 16-00-PLAN.md -- Wave 0: Create test stubs and fixtures for clean-multi-ids (Nyquist compliance)
-- [ ] 16-01-PLAN.md -- TDD: Implement clean-multi-ids with noise detection, sample validation, and multi-file output
+- [x] 16-01-PLAN.md -- TDD: Implement clean-multi-ids with noise detection, sample validation, and multi-file output
 
 ---
 
@@ -86,7 +86,7 @@ Plans:
 | 13. CLI Subcommand Foundation | 1/1 | Complete    | 2026-06-10 |
 | 14. ID Lookup Generation | 1/1 | Complete    | 2026-06-10 |
 | 15. Error Investigation & Reporting | 1/1 | Complete    | 2026-06-10 |
-| 16. Multi-ID Cleanup & Validation | 1/2 | In Progress|  |
+| 16. Multi-ID Cleanup & Validation | 2/2 | Complete   | 2026-06-11 |
 
 ---
 

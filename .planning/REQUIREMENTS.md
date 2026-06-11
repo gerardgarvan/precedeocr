@@ -23,9 +23,9 @@
 
 ### Multi-ID Cleanup (MULTI)
 
-- [ ] **MULTI-01**: User can analyze multi-ID pages to determine which are real (multiple IDs per page) vs OCR noise
-- [ ] **MULTI-02**: Conservative deduplication flags likely noise without deleting — biases toward preservation, raw data always preserved
-- [ ] **MULTI-03**: User can run cleanup via CLI subcommand with sample validation before full deployment
+- [x] **MULTI-01**: User can analyze multi-ID pages to determine which are real (multiple IDs per page) vs OCR noise
+- [x] **MULTI-02**: Conservative deduplication flags likely noise without deleting — biases toward preservation, raw data always preserved
+- [x] **MULTI-03**: User can run cleanup via CLI subcommand with sample validation before full deployment
 
 ---
 
