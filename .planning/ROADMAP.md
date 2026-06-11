@@ -71,7 +71,10 @@ Plans:
   3. Deduplication preserves legitimate sequential IDs while removing OCR artifacts
   4. Raw data is always preserved (original results.csv untouched)
   5. Cleanup report documents heuristics applied, IDs removed, and confidence metrics
-**Plans**: TBD
+**Plans:** 1 plan
+
+Plans:
+- [ ] 16-01-PLAN.md -- TDD: Implement clean-multi-ids with noise detection, sample validation, and multi-file output
 
 ---
 
@@ -82,7 +85,7 @@ Plans:
 | 13. CLI Subcommand Foundation | 1/1 | Complete    | 2026-06-10 |
 | 14. ID Lookup Generation | 1/1 | Complete    | 2026-06-10 |
 | 15. Error Investigation & Reporting | 1/1 | Complete    | 2026-06-10 |
-| 16. Multi-ID Cleanup & Validation | 0/? | Not started | - |
+| 16. Multi-ID Cleanup & Validation | 0/1 | Not started | - |
 
 ---
 
