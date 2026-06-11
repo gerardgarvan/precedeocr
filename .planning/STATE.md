@@ -2,20 +2,20 @@
 gsd_state_version: 1.0
 milestone: v1.3
 milestone_name: milestone
-status: planning
-last_updated: "2026-06-10T23:25:31.198Z"
+status: executing
+last_updated: "2026-06-11T01:48:49.011Z"
 progress:
   total_phases: 4
   completed_phases: 3
-  total_plans: 3
-  completed_plans: 3
-  percent: 100
+  total_plans: 5
+  completed_plans: 4
+  percent: 80
 ---
 
 # Project State: Precede OCR v1.3 Results Cleanup & ID Lookup
 
 **Last updated:** 2026-06-10
-**Status:** Ready to plan
+**Status:** Executing Phase 16
 
 ---
 
@@ -25,25 +25,26 @@ progress:
 Reliably extract every Precede ID from every page across 30K+ PDFs so the user can look up which file and page any given ID lives in.
 
 **Current Focus:**
-Phase 15 — error-investigation-reporting
+Phase 16 — multi-id-cleanup-validation
 
 ---
 
 ## Current Position
 
-Phase: 15 (error-investigation-reporting) — COMPLETE
-Plan: 1 of 1 COMPLETE
+Phase: 16 (multi-id-cleanup-validation) — EXECUTING
+Plan: 2 of 2
 **Milestone:** v1.3 Results Cleanup & ID Lookup
 **Phase:** 16
-**Plan:** Not started
-**Status:** Phase 15 complete, ready for Phase 16
+**Plan:** 16-00 complete (Wave 0 test stubs), ready for 16-01 (Wave 1 implementation)
+**Status:** Test infrastructure in place, 7 tests SKIP awaiting implementation
 
-**Progress:** [██████████] 100%
+**Progress:** [████████░░] 80%
 
 ```
 Phase 13 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 plans COMPLETE
 Phase 14 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 plans COMPLETE
 Phase 15 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 plans COMPLETE
+Phase 16 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/2 plans IN PROGRESS
 ```
 
 ---
@@ -54,16 +55,16 @@ Phase 15 ━━━━━━━━━━━━━━━━━━━━━━━�
 
 - Phases planned: 4
 - Phases complete: 3
-- Plans executed: 3
+- Plans executed: 4
 - Total requirements: 10
 - Requirements validated: 7 (LOOK-01, LOOK-02, LOOK-03, ERR-01, ERR-02, ERR-03, ERR-04)
 
 **Overall project:**
 
 - Total milestones: 3 (v1.0, v1.1, v1.2 shipped; v1.3 active)
-- Total phases completed: 13 (v1.0: 5, v1.1: 4, v1.2: 3, v1.3: 1)
-- Total plans executed: 32+ (v1.0: 10, v1.1: 9, v1.2: 12+, v1.3: 1+)
-- Total tests: 259 passing
+- Total phases completed: 13 (v1.0: 5, v1.1: 4, v1.2: 3, v1.3: 3)
+- Total plans executed: 35+ (v1.0: 10, v1.1: 9, v1.2: 12+, v1.3: 4+)
+- Total tests: 259 passing, 7 skipped (Wave 0 stubs)
 
 ---
 
@@ -98,6 +99,8 @@ Phase 15 ━━━━━━━━━━━━━━━━━━━━━━━�
 | Report only, no modifications to results.csv (D-03) | Phase 15 | Investigation is read-only per CONTEXT.md locked decision |
 | Copy-paste CLI commands in report (D-04) | Phase 15 | User can run commands to fix issues themselves |
 | scan_csv positional argument (D-05) | Phase 15 | Consistent with cmd_lookup pattern |
+| SystemExit detection pattern for stub functions | Phase 16-00 | cmd_clean_multi_ids stub exists (not None) - detect exit code 1 |
+| Phase 16 P00 | 3 | 1 tasks | 2 files |
 
 ### Key Decisions (Previous Milestones)
 
@@ -138,8 +141,9 @@ Phase 15 ━━━━━━━━━━━━━━━━━━━━━━━�
 - [x] Validate argparse subparser pattern against existing main() -- COMPLETE
 - [x] Ensure backward compatibility with v1.2 scan command -- COMPLETE (236 tests pass)
 - [x] Execute Phase 14 (ID Lookup Generation) -- COMPLETE (247 tests pass)
-- [ ] Execute Phase 15 (Error Investigation)
-- [ ] Execute Phase 16 (Multi-ID Cleanup)
+- [x] Execute Phase 15 (Error Investigation) -- COMPLETE (259 tests pass)
+- [ ] Execute Phase 16 Plan 00 (Multi-ID Cleanup Wave 0) -- COMPLETE (7 test stubs, all SKIP)
+- [ ] Execute Phase 16 Plan 01 (Multi-ID Cleanup Wave 1 implementation)
 
 ### Blockers
 
@@ -150,18 +154,18 @@ None -- Phase 13 complete, Phases 14-16 can proceed independently.
 ## Session Continuity
 
 **What just happened:**
-Phase 15 (Error Investigation & Reporting) completed. Implemented cmd_investigate() replacing stub with full error diagnosis and quality reporting. 12 new tests added via TDD. All 259 tests pass. ERR-01 through ERR-04 requirements validated.
+Phase 16 Plan 00 (Wave 0 - Test Stubs) completed. Created test infrastructure for clean-multi-ids feature following Nyquist pattern. Added sample_multi_id_csv fixture and TestCleanMultiIds class with 7 test stubs. All tests SKIP as expected (production functions not yet implemented). 259 existing tests pass (no regressions).
 
 **What's next:**
-Execute Phase 16 (Multi-ID Cleanup). This is the final phase of v1.3 milestone.
+Execute Phase 16 Plan 01 (Wave 1 - Implementation). Implement production functions to make all 7 tests GREEN.
 
 **Context to preserve:**
 
-- cmd_investigate() reads scan CSV, categorizes failed files (FileNotFoundError/EmptyFileError), re-renders no-match pages for diagnosis (blank detection + OCR categorization), generates markdown quality report with copy-paste CLI commands
-- Output files: quality_report.md, no_match_pages.csv, failed_files.csv
-- Helper functions: is_blank_page() (PIL histogram analysis), investigate_failed_files(), investigate_no_match_pages(), generate_investigation_report()
-- CLI: `python precede_ocr.py investigate results.csv --report output/quality_report.md`
-- Phase 16 still has stub handler to replace (cmd_clean_multi_ids)
+- Wave 0 test stubs cover: same-page dedup, repeated-digit detection, seq_outlier parsing, conservative dedup (keep='first'), raw data preservation, CLI integration, 3-file output
+- sample_multi_id_csv fixture: 8 rows with duplicates, repeated-digit patterns (11111), seq_outlier flags
+- SystemExit detection pattern for stub cmd_clean_multi_ids (exists but exits with code 1)
+- Functions to implement in Wave 1: detect_same_page_duplicates, detect_repeated_digit_ids, extract_outlier_confidence, generate_cleanup_report, cmd_clean_multi_ids
+- Phase 16 context decisions: CSV heuristics only (D-01), same-page dedup + pattern heuristics (D-02), no cross-page frequency analysis (D-03), interactive sample validation (D-04), 3 output files (D-06), raw data always preserved (D-07)
 
 ---
 
@@ -170,11 +174,11 @@ Execute Phase 16 (Multi-ID Cleanup). This is the final phase of v1.3 milestone.
 | Metric | Value |
 |--------|-------|
 | Milestone | v1.3 Results Cleanup & ID Lookup |
-| Phase | 15 / 16 |
-| Plans complete | 3 / 3 (Phase 13 + Phase 14 + Phase 15) |
+| Phase | 16 / 16 |
+| Plans complete | 4 / 5 (Phase 13 + Phase 14 + Phase 15 + Phase 16-00) |
 | Requirements | 10 total (7 validated: LOOK-01, LOOK-02, LOOK-03, ERR-01, ERR-02, ERR-03, ERR-04) |
-| Test coverage | 259 tests passing |
-| LOC | ~5,910 Python (~2,490 pipeline + ~3,420 tests) |
+| Test coverage | 259 tests passing, 7 skipped (Phase 16 Wave 0 stubs) |
+| LOC | ~6,120 Python (~2,490 pipeline + ~3,630 tests) |
 
 ---
 *This file is the source of truth for project state. Update after each phase transition.*
