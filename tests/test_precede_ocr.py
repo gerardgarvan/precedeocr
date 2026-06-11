@@ -4028,6 +4028,35 @@ class TestCleanMultiIds:
         assert result_df.iloc[1]['is_duplicate'] == True
         assert result_df.iloc[2]['is_duplicate'] == True
 
+    def test_generate_cleanup_report(self):
+        """generate_cleanup_report produces markdown with summary and breakdown."""
+        if generate_cleanup_report is None:
+            pytest.skip("generate_cleanup_report not yet implemented")
+
+        import pandas as pd
+        # Mock DataFrames
+        cleaned_df = pd.DataFrame([
+            {'filename': 'fileA.pdf', 'page': 1, 'id': '12345'},
+            {'filename': 'fileB.pdf', 'page': 2, 'id': '67890'},
+        ])
+        removed_df = pd.DataFrame([
+            {'filename': 'fileA.pdf', 'page': 1, 'id': '12345', 'removal_reason': 'exact_duplicate_same_page', 'confidence': 100},
+            {'filename': 'fileA.pdf', 'page': 2, 'id': '11111', 'removal_reason': 'repeated_digit_artifact', 'confidence': 95},
+        ])
+
+        report = generate_cleanup_report(cleaned_df, removed_df, Path("input.csv"))
+
+        # Check report structure
+        assert "# Multi-ID Cleanup Report" in report
+        assert "## Summary" in report
+        assert "## Heuristics Applied" in report
+        assert "## Removal Breakdown" in report
+        assert "## Confidence Distribution" in report
+        # Check counts
+        assert "Original rows | 4" in report  # 2 cleaned + 2 removed
+        assert "Cleaned rows | 2" in report
+        assert "Removed rows | 2" in report
+
     def test_clean_preserves_input_csv(self, sample_multi_id_csv, temp_dir):
         """cmd_clean_multi_ids does not modify original input CSV (D-07)."""
         if cmd_clean_multi_ids is None:

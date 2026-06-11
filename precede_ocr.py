@@ -2493,6 +2493,149 @@ def cmd_investigate(args):
     print(f"  No-match pages: {no_match_csv}")
 
 
+def detect_same_page_duplicates(df):
+    """
+    Detect exact duplicate IDs on the same page.
+
+    Groups by (filename, page) and marks duplicate IDs within each group.
+    Uses keep='first' to preserve the first occurrence (conservative deduplication
+    per Phase 16 D-02).
+
+    Args:
+        df: DataFrame with columns 'filename', 'page', 'id'
+
+    Returns:
+        DataFrame with added 'is_duplicate' boolean column
+    """
+    result_df = df.copy()
+    result_df['is_duplicate'] = result_df.groupby(['filename', 'page'])['id'].transform(
+        lambda x: x.duplicated(keep='first')
+    )
+    return result_df
+
+
+def detect_repeated_digit_ids(df):
+    """
+    Detect IDs with all identical digits (e.g., 11111, 00000).
+
+    Common OCR artifacts from lines, borders, or processing errors.
+    Per Phase 16 D-02.
+
+    Args:
+        df: DataFrame with column 'id'
+
+    Returns:
+        DataFrame with added 'is_repeated_digit' boolean column
+    """
+    import re
+    result_df = df.copy()
+    pattern = r'^(\d)\1{4}$'  # Matches 5 identical digits
+    # Use apply with re.match to avoid pyarrow regex issues
+    result_df['is_repeated_digit'] = result_df['id'].apply(
+        lambda x: bool(re.match(pattern, str(x))) if pd.notna(x) else False
+    )
+    return result_df
+
+
+def extract_outlier_confidence(notes_str):
+    """
+    Extract confidence percentage from seq_outlier_conf_N% flags in notes field.
+
+    The scan pipeline's validate_sequential_ids() function flags statistical
+    outliers and stores confidence in notes as 'seq_outlier_conf_85%'.
+    Per Phase 16 D-02.
+
+    Args:
+        notes_str: Notes string from scan results CSV
+
+    Returns:
+        int: Confidence percentage (0-100), or 0 if no flag found
+    """
+    import re
+    if not notes_str or pd.isna(notes_str):
+        return 0
+    match = re.search(r'seq_outlier_conf_(\d+)%', str(notes_str))
+    return int(match.group(1)) if match else 0
+
+
+def generate_cleanup_report(cleaned_df, removed_df, input_path):
+    """
+    Generate markdown cleanup report documenting heuristics and results.
+
+    Per Phase 16 D-06.
+
+    Args:
+        cleaned_df: DataFrame of IDs kept (after noise removal)
+        removed_df: DataFrame of IDs removed (with removal_reason, confidence)
+        input_path: Path to original input CSV
+
+    Returns:
+        str: Markdown report content
+    """
+    original_count = len(cleaned_df) + len(removed_df)
+    removed_count = len(removed_df)
+    removal_pct = (removed_count / original_count * 100) if original_count > 0 else 0
+
+    # Breakdown by reason
+    reason_counts = removed_df['removal_reason'].value_counts()
+    breakdown_lines = []
+    for reason, count in reason_counts.items():
+        breakdown_lines.append(f"| {reason} | {count:,} | {count/removed_count*100:.1f}% |")
+
+    # Confidence stats
+    if not removed_df.empty and 'confidence' in removed_df.columns:
+        conf_min = removed_df['confidence'].min()
+        conf_max = removed_df['confidence'].max()
+        conf_mean = removed_df['confidence'].mean()
+        conf_section = f"""
+## Confidence Distribution
+
+| Metric | Value |
+|--------|-------|
+| Minimum confidence | {conf_min}% |
+| Maximum confidence | {conf_max}% |
+| Mean confidence | {conf_mean:.1f}% |
+"""
+    else:
+        conf_section = ""
+
+    report = f"""# Multi-ID Cleanup Report
+
+**Input:** `{input_path}`
+**Generated:** {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+## Summary
+
+| Metric | Value |
+|--------|-------|
+| Original rows | {original_count:,} |
+| Cleaned rows | {len(cleaned_df):,} |
+| Removed rows | {removed_count:,} |
+| Removal rate | {removal_pct:.2f}% |
+
+## Heuristics Applied
+
+Three noise detection methods were applied (Phase 16 D-02):
+
+1. **Same-page exact duplicates**: Identical (filename, page, ID) tuples appearing more than once
+2. **Repeated-digit artifacts**: IDs with all identical digits (e.g., 11111, 00000)
+3. **Sequential outliers**: High-confidence statistical outliers from scan pipeline (seq_outlier_conf > 80%)
+
+## Removal Breakdown
+
+| Reason | Count | Percentage |
+|--------|-------|------------|
+{chr(10).join(breakdown_lines)}
+{conf_section}
+## Data Preservation
+
+Original input CSV preserved unchanged at: `{input_path}`
+
+Removed IDs exported to `removed_ids.csv` with full audit trail (removal_reason, confidence).
+"""
+    return report
+
+
 def cmd_clean_multi_ids(args):
     """Handler for clean-multi-ids subcommand. Stub for Phase 16 implementation."""
     print("clean-multi-ids command not yet implemented. Coming in a future update.")
