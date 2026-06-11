@@ -62,3 +62,22 @@ def sample_investigate_csv(temp_dir):
         encoding='utf-8'
     )
     return str(csv_path)
+
+
+@pytest.fixture
+def sample_multi_id_csv(temp_dir):
+    """Create sample CSV with multi-ID pages, duplicates, and noise for cleanup testing."""
+    csv_path = Path(temp_dir) / "results.csv"
+    csv_path.write_text(
+        "filename,folder_path,page,id,rotation_detected,notes\n"
+        "fileA.pdf,subdir1,1,12345,90,\n"
+        "fileA.pdf,subdir1,1,12345,90,\n"           # exact duplicate on same page
+        "fileA.pdf,subdir1,1,67890,0,\n"             # legitimate second ID
+        "fileA.pdf,subdir1,2,11111,90,\n"            # repeated-digit artifact
+        "fileA.pdf,subdir1,3,23456,90,\n"
+        "fileB.pdf,subdir2,1,34567,0,\n"
+        "fileB.pdf,subdir2,2,45678,0,seq_outlier_conf_90%\n"  # high-confidence outlier
+        "fileB.pdf,subdir2,3,56789,270,\n",
+        encoding='utf-8'
+    )
+    return str(csv_path)
