@@ -2192,17 +2192,11 @@ def cmd_lookup(args):
     df = df[df['page'] != 0]
     df = df[~df['notes'].astype(str).str.startswith('error:', na=False)]
 
-    # D-04: Handle folder_path column (present in new format, missing in old)
-    if 'folder_path' in df.columns:
-        df_lookup = df[['id', 'filename', 'page', 'folder_path']].copy()
-    else:
-        df_lookup = df[['id', 'filename', 'page']].copy()
-        df_lookup['folder_path'] = df['filename'].apply(
-            lambda fname: str(Path(fname).parent) if str(Path(fname).parent) != '.' else ''
-        )
+    # Select columns for lookup output
+    df_lookup = df[['id', 'filename', 'page']].copy()
 
-    # Rename columns per LOOK-01: ID, Filename, Page, Folder
-    df_lookup.columns = ['ID', 'Filename', 'Page', 'Folder']
+    # Rename columns per LOOK-01: ID, Filename, Page
+    df_lookup.columns = ['ID', 'Filename', 'Page']
 
     # LOOK-01: Sort numerically by ID
     df_lookup['ID'] = pd.to_numeric(df_lookup['ID'], errors='coerce')

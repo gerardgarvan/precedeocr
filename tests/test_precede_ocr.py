@@ -3580,14 +3580,14 @@ class TestCmdLookup:
         return Namespace(scan_csv=scan_csv, output=output)
 
     def test_cmd_lookup_basic(self, sample_scan_csv, temp_dir):
-        """LOOK-01: Output CSV has columns ID, Filename, Page, Folder with valid rows only."""
+        """LOOK-01: Output CSV has columns ID, Filename, Page with valid rows only."""
         output_path = str(Path(temp_dir) / "lookup.csv")
         args = self._make_args(sample_scan_csv, output_path)
         cmd_lookup(args)
 
         import pandas as pd
         df = pd.read_csv(output_path)
-        assert list(df.columns) == ['ID', 'Filename', 'Page', 'Folder']
+        assert list(df.columns) == ['ID', 'Filename', 'Page']
         assert len(df) == 3  # 3 valid ID rows (blank + error filtered out)
 
     def test_cmd_lookup_numeric_sort(self, temp_dir):
@@ -3663,8 +3663,8 @@ class TestCmdLookup:
         assert len(df) == 2
         assert df['ID'].tolist() == ['12345', '12345']
 
-    def test_cmd_lookup_legacy_csv(self, temp_dir):
-        """D-04: CSV without folder_path column still produces Folder from filename."""
+    def test_cmd_lookup_no_folder_column(self, temp_dir):
+        """Output CSV has no Folder column."""
         csv_path = Path(temp_dir) / "results.csv"
         csv_path.write_text(
             "filename,page,id,rotation_detected,notes\n"
@@ -3677,8 +3677,8 @@ class TestCmdLookup:
 
         import pandas as pd
         df = pd.read_csv(output_path)
-        assert 'Folder' in df.columns
-        assert df['Folder'].iloc[0] == 'subdir1'
+        assert 'Folder' not in df.columns
+        assert list(df.columns) == ['ID', 'Filename', 'Page']
 
     def test_cmd_lookup_summary(self, sample_scan_csv, temp_dir, capsys):
         """D-05: Summary stats printed to stdout."""
