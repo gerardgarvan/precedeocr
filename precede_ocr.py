@@ -2637,9 +2637,132 @@ Removed IDs exported to `removed_ids.csv` with full audit trail (removal_reason,
 
 
 def cmd_clean_multi_ids(args):
-    """Handler for clean-multi-ids subcommand. Stub for Phase 16 implementation."""
-    print("clean-multi-ids command not yet implemented. Coming in a future update.")
-    sys.exit(1)
+    """
+    Handler for clean-multi-ids subcommand.
+
+    Analyzes multi-ID pages to detect OCR noise (same-page duplicates,
+    repeated-digit artifacts, sequential outliers) and produces cleaned
+    output with sample validation.
+
+    Implements MULTI-01 (analysis), MULTI-02 (conservative dedup),
+    MULTI-03 (CLI with sample validation).
+    Follows D-01 through D-07 decisions from Phase 16 CONTEXT.md.
+    """
+    scan_csv_path = Path(args.scan_csv)
+    output_path = Path(args.output)
+
+    # D-07: Safety check -- never overwrite input
+    if scan_csv_path.resolve() == output_path.resolve():
+        print(f"Error: Output path cannot be the same as input CSV: {scan_csv_path}")
+        sys.exit(1)
+
+    # Validate input file exists
+    if not scan_csv_path.exists():
+        print(f"Error: Scan CSV not found: {scan_csv_path}")
+        sys.exit(1)
+
+    # Read CSV
+    try:
+        df = pd.read_csv(scan_csv_path)
+    except Exception as e:
+        print(f"Error reading CSV: {e}")
+        sys.exit(1)
+
+    # Validate columns
+    required_cols = {'filename', 'page', 'id', 'notes'}
+    if not required_cols.issubset(set(df.columns)):
+        missing = required_cols - set(df.columns)
+        print(f"Error: CSV missing required columns: {missing}")
+        sys.exit(1)
+
+    # Exclude error rows (page=0) before analysis
+    df_valid = df[df['page'] > 0].copy()
+    df_errors = df[df['page'] <= 0].copy()
+
+    # MULTI-01: Apply three detection heuristics (per D-02)
+    df_valid = detect_same_page_duplicates(df_valid)
+    df_valid = detect_repeated_digit_ids(df_valid)
+    df_valid['outlier_conf'] = df_valid['notes'].apply(extract_outlier_confidence)
+    df_valid['is_high_conf_outlier'] = df_valid['outlier_conf'] > 80
+
+    # Combine flags
+    df_valid['flagged_for_removal'] = (
+        df_valid['is_duplicate'] |
+        df_valid['is_repeated_digit'] |
+        df_valid['is_high_conf_outlier']
+    )
+
+    # Set removal_reason and confidence
+    df_valid['removal_reason'] = ''
+    df_valid['confidence'] = 0
+
+    dup_mask = df_valid['is_duplicate']
+    df_valid.loc[dup_mask, 'removal_reason'] = 'exact_duplicate_same_page'
+    df_valid.loc[dup_mask, 'confidence'] = 100
+
+    rep_mask = df_valid['is_repeated_digit'] & ~df_valid['is_duplicate']
+    df_valid.loc[rep_mask, 'removal_reason'] = 'repeated_digit_artifact'
+    df_valid.loc[rep_mask, 'confidence'] = 95
+
+    out_mask = df_valid['is_high_conf_outlier'] & ~df_valid['is_duplicate'] & ~df_valid['is_repeated_digit']
+    df_valid.loc[out_mask, 'removal_reason'] = 'sequential_outlier'
+    df_valid.loc[out_mask, 'confidence'] = df_valid.loc[out_mask, 'outlier_conf']
+
+    # Check if any noise detected
+    flagged_df = df_valid[df_valid['flagged_for_removal']].copy()
+    if len(flagged_df) == 0:
+        print("No noise detected. Dataset is clean.")
+        sys.exit(0)
+
+    # D-04: Sample validation with interactive prompt
+    sample_size = min(args.sample_size, len(flagged_df))
+    sample = flagged_df.sample(n=sample_size, random_state=42)
+
+    print(f"\n{'='*60}")
+    print(f"SAMPLE VALIDATION: {sample_size} flagged IDs (of {len(flagged_df)} total)")
+    print(f"{'='*60}\n")
+    print(sample[['filename', 'page', 'id', 'removal_reason', 'confidence']].to_string(index=False))
+
+    print(f"\n--- Breakdown (Full Dataset) ---")
+    for reason, count in flagged_df['removal_reason'].value_counts().items():
+        print(f"  {reason}: {count}")
+
+    print(f"\nApply cleanup to full dataset? This will:")
+    print(f"  - Write cleaned CSV with {len(df_valid) - len(flagged_df)} rows (noise removed)")
+    print(f"  - Write removed_ids.csv with {len(flagged_df)} flagged rows (audit trail)")
+    print(f"  - Preserve original {args.scan_csv} (unchanged)")
+
+    response = input("\nProceed? [y/N]: ").strip().lower()
+    if response != 'y':
+        print("Cleanup cancelled. No files written.")
+        sys.exit(0)
+
+    # D-06: Write three output files
+    original_cols = ['filename', 'folder_path', 'page', 'id', 'rotation_detected', 'notes']
+    keep_cols = [c for c in original_cols if c in df_valid.columns]
+
+    cleaned_df = df_valid[~df_valid['flagged_for_removal']][keep_cols].copy()
+    if not df_errors.empty:
+        error_keep_cols = [c for c in keep_cols if c in df_errors.columns]
+        cleaned_df = pd.concat([cleaned_df, df_errors[error_keep_cols]], ignore_index=True)
+
+    removed_cols = keep_cols + ['removal_reason', 'confidence']
+    removed_df = df_valid[df_valid['flagged_for_removal']][removed_cols].copy()
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cleaned_df.to_csv(output_path, index=False, encoding='utf-8-sig', quoting=csv.QUOTE_NONNUMERIC)
+
+    removed_csv = output_path.parent / 'removed_ids.csv'
+    removed_df.to_csv(removed_csv, index=False, encoding='utf-8-sig', quoting=csv.QUOTE_NONNUMERIC)
+
+    report_path = output_path.parent / 'cleanup_report.md'
+    report_content = generate_cleanup_report(cleaned_df, removed_df, scan_csv_path)
+    report_path.write_text(report_content, encoding='utf-8')
+
+    print(f"\nCleanup complete.")
+    print(f"  Cleaned CSV: {output_path} ({len(cleaned_df):,} rows)")
+    print(f"  Removed IDs: {removed_csv} ({len(removed_df):,} rows)")
+    print(f"  Report: {report_path}")
 
 
 if __name__ == '__main__':

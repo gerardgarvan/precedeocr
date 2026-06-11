@@ -4134,3 +4134,97 @@ class TestCleanMultiIds:
         removed_df = pd.read_csv(output_path.parent / 'removed_ids.csv')
         assert 'removal_reason' in removed_df.columns
         assert 'confidence' in removed_df.columns
+
+    def test_cmd_clean_multi_ids_utf8_bom(self, sample_multi_id_csv, temp_dir):
+        """cmd_clean_multi_ids outputs CSV with UTF-8 BOM for Excel compatibility."""
+        if cmd_clean_multi_ids is None:
+            pytest.skip("cmd_clean_multi_ids not yet implemented")
+
+        output_path = Path(temp_dir) / "results_cleaned.csv"
+        args = self._make_args(sample_multi_id_csv, str(output_path))
+
+        with patch('builtins.input', return_value='y'):
+            cmd_clean_multi_ids(args)
+
+        # Check UTF-8 BOM
+        with open(output_path, 'rb') as f:
+            first_bytes = f.read(3)
+            assert first_bytes == b'\xef\xbb\xbf', "Output CSV should start with UTF-8 BOM"
+
+    def test_cmd_clean_multi_ids_missing_file(self, temp_dir):
+        """cmd_clean_multi_ids exits with error if input file doesn't exist."""
+        if cmd_clean_multi_ids is None:
+            pytest.skip("cmd_clean_multi_ids not yet implemented")
+
+        output_path = Path(temp_dir) / "results_cleaned.csv"
+        nonexistent = Path(temp_dir) / "nonexistent.csv"
+        args = self._make_args(str(nonexistent), str(output_path))
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_clean_multi_ids(args)
+        assert exc_info.value.code == 1
+
+    def test_cmd_clean_multi_ids_missing_columns(self, temp_dir):
+        """cmd_clean_multi_ids exits with error if CSV missing required columns."""
+        if cmd_clean_multi_ids is None:
+            pytest.skip("cmd_clean_multi_ids not yet implemented")
+
+        # Create CSV with wrong columns
+        csv_path = Path(temp_dir) / "wrong_columns.csv"
+        csv_path.write_text("col1,col2,col3\n1,2,3\n", encoding='utf-8')
+        output_path = Path(temp_dir) / "results_cleaned.csv"
+        args = self._make_args(str(csv_path), str(output_path))
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_clean_multi_ids(args)
+        assert exc_info.value.code == 1
+
+    def test_cmd_clean_multi_ids_no_noise(self, temp_dir):
+        """cmd_clean_multi_ids exits gracefully when dataset is clean (no noise)."""
+        if cmd_clean_multi_ids is None:
+            pytest.skip("cmd_clean_multi_ids not yet implemented")
+
+        # Create clean CSV (no duplicates, no repeated digits, no outliers)
+        csv_path = Path(temp_dir) / "clean.csv"
+        csv_path.write_text(
+            "filename,folder_path,page,id,rotation_detected,notes\n"
+            "fileA.pdf,subdir1,1,12345,90,\n"
+            "fileB.pdf,subdir2,1,67890,0,\n",
+            encoding='utf-8'
+        )
+        output_path = Path(temp_dir) / "results_cleaned.csv"
+        args = self._make_args(str(csv_path), str(output_path))
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_clean_multi_ids(args)
+        assert exc_info.value.code == 0
+
+    def test_cmd_clean_multi_ids_output_same_as_input(self, sample_multi_id_csv, temp_dir):
+        """cmd_clean_multi_ids prevents overwriting input CSV (D-07 safety check)."""
+        if cmd_clean_multi_ids is None:
+            pytest.skip("cmd_clean_multi_ids not yet implemented")
+
+        args = self._make_args(sample_multi_id_csv, sample_multi_id_csv)
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_clean_multi_ids(args)
+        assert exc_info.value.code == 1
+
+    def test_cmd_clean_multi_ids_user_cancels(self, sample_multi_id_csv, temp_dir):
+        """cmd_clean_multi_ids exits gracefully when user cancels at prompt."""
+        if cmd_clean_multi_ids is None:
+            pytest.skip("cmd_clean_multi_ids not yet implemented")
+
+        output_path = Path(temp_dir) / "results_cleaned.csv"
+        args = self._make_args(sample_multi_id_csv, str(output_path))
+
+        # Mock input prompt to cancel
+        with patch('builtins.input', return_value='n'):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_clean_multi_ids(args)
+        assert exc_info.value.code == 0
+
+        # No output files should be created
+        assert not output_path.exists()
+        assert not (output_path.parent / 'removed_ids.csv').exists()
+        assert not (output_path.parent / 'cleanup_report.md').exists()
